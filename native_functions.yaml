@@ -1,0 +1,42 @@
+# ============================================================
+# 模拟 PyTorch 的 native_functions.yaml
+# 对应 PyTorch: aten/src/ATen/native/native_functions.yaml
+#
+# 每个条目定义一个算子:
+#   - func: 函数签名 (返回类型 函数名(参数列表))
+#   - dispatch: 调用的 native 函数名
+#
+# codegen.py 读取此文件，生成:
+#   - generated/tensor_methods.h   (Tensor 类的方法声明)
+#   - generated/dispatch.h         (Tensor 方法实现，调用 native 函数)
+#   - generated/bindings.inl       (pybind11 .def() 绑定)
+#
+# 修改此文件后只需 make，不会重新编译 tensor_base.o
+# ============================================================
+
+- func: Tensor add(const Tensor& other) const
+  native: "native::add(*this, other)"
+  binding: .def("add", &Tensor::add)
+  module_binding: m.def("add", &native::add, py::arg("a"), py::arg("b"))
+  operator: .def("__add__", [](const Tensor& a, const Tensor& b) { return native::add(a, b); })
+
+- func: Tensor mul(const Tensor& other) const
+  native: "native::mul(*this, other)"
+  binding: .def("mul", &Tensor::mul)
+  module_binding: m.def("mul", &native::mul, py::arg("a"), py::arg("b"))
+  operator: .def("__mul__", [](const Tensor& a, const Tensor& b) { return native::mul(a, b); })
+
+- func: Tensor matmul(const Tensor& other) const
+  native: "native::matmul(*this, other)"
+  binding: .def("matmul", &Tensor::matmul)
+  module_binding: m.def("matmul", &native::matmul, py::arg("a"), py::arg("b"))
+
+- func: Tensor relu() const
+  native: "native::relu(*this)"
+  binding: .def("relu", &Tensor::relu)
+  module_binding: m.def("relu", &native::relu, py::arg("input"))
+
+- func: float sum() const
+  native: "native::sum(*this)"
+  binding: .def("sum", &Tensor::sum)
+  module_binding: m.def("sum", &native::sum, py::arg("input"))
