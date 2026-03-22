@@ -84,6 +84,6 @@ demo_codegen:
 	@echo "=============================="
 
 clean:
-	rm -f $(TARGET) *.o
+	rm -f $(TARGET) *.o *.so
 	rm -rf generated/
 	rm -rf build *.egg-info
