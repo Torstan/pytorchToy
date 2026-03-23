@@ -3,19 +3,20 @@
 #include <sstream>
 
 // ============================================================
-// 模拟 c10::intrusive_ptr<TensorImpl>
+// 模拟 c10::intrusive_ptr<T>
 // 对应 PyTorch: c10/util/intrusive_ptr.h
 //
-// 侵入式智能指针，引用计数存储在对象自身（TensorImpl::refcount_）中，
-// 而非像 shared_ptr 那样额外分配控制块，减少一次内存分配。
+// 通用侵入式智能指针模板。T 必须继承 IntrusivePtrTarget。
+// 引用计数存储在对象自身中，避免像 shared_ptr 那样额外分配控制块。
 // ============================================================
 
+template<typename T>
 class IntrusivePtr {
-    TensorImpl* ptr_ = nullptr;
+    T* ptr_ = nullptr;
 
 public:
     IntrusivePtr() = default;
-    explicit IntrusivePtr(TensorImpl* p) : ptr_(p) {}
+    explicit IntrusivePtr(T* p) : ptr_(p) {}
 
     IntrusivePtr(const IntrusivePtr& other) : ptr_(other.ptr_) {
         if (ptr_) ptr_->retain();
@@ -41,12 +42,15 @@ public:
     }
     ~IntrusivePtr() { if (ptr_) ptr_->release(); }
 
-    TensorImpl* get() const { return ptr_; }
-    TensorImpl* operator->() const { return ptr_; }
-    TensorImpl& operator*() const { return *ptr_; }
+    T* get() const { return ptr_; }
+    T* operator->() const { return ptr_; }
+    T& operator*() const { return *ptr_; }
     explicit operator bool() const { return ptr_ != nullptr; }
     int use_count() const { return ptr_ ? ptr_->refcount_.load() : 0; }
 };
+
+// TensorImpl 专用的侵入式指针类型别名
+using TensorImplPtr = IntrusivePtr<TensorImpl>;
 
 // ============================================================
 // TensorBase — 不依赖算子定义的基础句柄
@@ -59,11 +63,11 @@ public:
 
 class TensorBase {
 protected:
-    IntrusivePtr impl_;
+    TensorImplPtr impl_;
 
 public:
     TensorBase() = default;
-    explicit TensorBase(IntrusivePtr impl) : impl_(std::move(impl)) {}
+    explicit TensorBase(TensorImplPtr impl) : impl_(std::move(impl)) {}
 
     // 元信息访问 — 委托给 TensorImpl
     int dim() const { return impl_->dim(); }
@@ -75,6 +79,9 @@ public:
     void set_requires_grad(bool req) { impl_->requires_grad_ = req; }
     bool defined() const { return impl_ && impl_.get() != nullptr; }
     int use_count() const { return impl_.use_count(); }
+    bool is_contiguous() const { return impl_->is_contiguous(); }
+    int storage_offset() const { return impl_->storage_offset_; }
+    const std::shared_ptr<Storage>& storage() const { return impl_->storage_; }
 
     // 数据访问
     float* data_ptr() { return impl_->data_ptr(); }

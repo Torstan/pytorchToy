@@ -14,7 +14,7 @@
 class Tensor : public TensorBase {
 public:
     Tensor() = default;
-    explicit Tensor(IntrusivePtr impl) : TensorBase(std::move(impl)) {}
+    explicit Tensor(TensorImplPtr impl) : TensorBase(std::move(impl)) {}
 
     // 从 TensorBase 构造（需要增加引用计数）
     explicit Tensor(const TensorBase& base) : TensorBase(base) {}

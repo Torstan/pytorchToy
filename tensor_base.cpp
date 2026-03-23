@@ -16,6 +16,11 @@
 
 std::string TensorBase::repr() const {
     std::ostringstream oss;
+    if (dim() == 0) {
+        // 0-dim 标量 tensor，类似 PyTorch: tensor(2.)
+        oss << "tensor(" << impl_->storage_->data[impl_->storage_offset_] << ")";
+        return oss.str();
+    }
     oss << "Tensor(shape=[";
     for (int i = 0; i < dim(); i++) {
         if (i > 0) oss << ", ";
@@ -23,10 +28,9 @@ std::string TensorBase::repr() const {
     }
     oss << "], data=[";
     int n = std::min(numel(), 6);
-    const float* d = data_ptr();
     for (int i = 0; i < n; i++) {
         if (i > 0) oss << ", ";
-        oss << d[i];
+        oss << impl_->read_logical(i);
     }
     if (numel() > 6) oss << ", ...";
     oss << "])";
