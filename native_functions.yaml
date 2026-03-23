@@ -40,3 +40,28 @@
   native: "native::sum(*this)"
   binding: .def("sum", &Tensor::sum)
   module_binding: m.def("sum", &native::sum, py::arg("input"))
+
+- func: Tensor contiguous() const
+  native: "native::contiguous(*this)"
+  binding: .def("contiguous", &Tensor::contiguous)
+  module_binding: m.def("contiguous", &native::contiguous, py::arg("self"))
+
+- func: Tensor transpose(int dim0, int dim1) const
+  native: "native::transpose(*this, dim0, dim1)"
+  binding: .def("transpose", &Tensor::transpose, py::arg("dim0"), py::arg("dim1"))
+  module_binding: m.def("transpose", &native::transpose, py::arg("self"), py::arg("dim0"), py::arg("dim1"))
+
+- func: Tensor slice(int dim, int start, int end) const
+  native: "native::slice(*this, dim, start, end)"
+  binding: .def("slice", &Tensor::slice, py::arg("dim"), py::arg("start"), py::arg("end"))
+  module_binding: m.def("slice", &native::slice, py::arg("self"), py::arg("dim"), py::arg("start"), py::arg("end"))
+
+- func: Tensor reshape(std::vector<int> shape) const
+  native: "native::reshape(*this, shape)"
+  binding: .def("reshape", &Tensor::reshape, py::arg("shape"))
+  module_binding: m.def("reshape", &native::reshape, py::arg("self"), py::arg("shape"))
+
+- func: Tensor expand(std::vector<int> sizes) const
+  native: "native::expand(*this, sizes)"
+  binding: .def("expand", &Tensor::expand, py::arg("sizes"))
+  module_binding: m.def("expand", &native::expand, py::arg("self"), py::arg("sizes"))
