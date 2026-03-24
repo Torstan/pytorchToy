@@ -1,0 +1,65 @@
+实施计划
+
+1. 主题：在pytorchToy项目中增加autograd的最核心的功能
+
+2. 背景：
+PyTorch 0.1.11已支持autograd，对应的代码在/mnt/d/ginobili/code/pytorch文件夹，其中测试代码在/mnt/d/ginobili/code/pytorch/examples/autograd_test.py。
+参考PyTorch 0.1.11 autograd的原理和代码，实现autograd的最核心的功能，为了简单起见，不必要的代码不用写。
+
+3. 实现原理：
+参考PyTorch 0.1.11 已经实现了完整的 Python 自定义 autograd 函数机制。用户在 Python 中只需定义 forward 和 backward，框架自动完成计算图构建和梯度传播。
+
+工作原理
+整个机制由 python_function.cpp 中的 THPFunction / PyFunction 桥接实现，分两条路径：
+
+前向：THPFunction_do_forward（L426-L529）
+C++ 侧完成所有 bookkeeping，然后回调 Python 的 forward：
+
+
+用户调用 MyFunc.apply(x)
+  → C++: THPFunction_do_forward
+    → 1. 从 Variable 中解包出裸 Tensor（L442-L443）
+    → 2. 记录 requires_grad、is_volatile（L446-L449）
+    → 3. 调用 Python 的 self.forward(*tensors)（L453-L456）
+    → 4. 将输出 Tensor 包装成 Variable，creator 指向 self（L500）
+    → 5. 构建 previous_functions 连接计算图（L482-L496）
+    → 6. 保存 save_for_backward 的变量（L503）
+反向：Engine → PyFunction::apply → THPFunction_do_backward
+当调用 loss.backward() 时：
+
+
+Engine::backward
+  → evaluate_function → PyFunction::apply（L35-L73）
+    → 将 C++ 梯度转成 Python Tensor
+    → 调用 Python 的 self._do_backward(grad_output)（L53-L54）
+      → THPFunction_do_backward（L600-L643）
+        → _prepare_grad_output: 将 None 梯度替换为零张量（L535-L578）
+        → 调用 Python 的 self.backward(*grad_output)（L619-L622）
+        → 返回 grad_input 元组给 Engine
+  → Engine 继续向前驱节点传播
+Python 端用法
+
+class MySquare(torch.autograd.Function):
+    def forward(self, x):
+        self.save_for_backward(x)    # 保存 x 用于反向
+        return x * x
+
+    def backward(self, grad_output):
+        x, = self.saved_tensors      # 取出保存的 x（L662-L688 版本检查）
+        return 2 * x * grad_output
+
+x = Variable(torch.FloatTensor([3.0]), requires_grad=True)
+y = MySquare()(x)     # → THPFunction_do_forward → self.forward(x)
+y.backward()           # → Engine → PyFunction::apply → self.backward(grad)
+print(x.grad)          # tensor([6.0]).
+
+4. 要求：
+pytorchToy/torch/autograd目录：python相关的代码。
+pytorchToy/autograd目录：c++ autograd引擎相关代码，包括自动自动计算grad引擎和性能优化算子等，需要支持GPU和CPU，其中GPU相关的功能可以不实现。
+
+5. 测试用例:
+路径：/mnt/d/ginobili/code/test/pytorchToy/test/test_autograd.py
+完成c++引擎和python相关功能开发后，验证测试用例能正常通过，如果失败，分析原因，并解决。
+
+6. 其它
+在开发过程中，可以在/mnt/d/ginobili/code/test/pytorchToy/test/下增加一些单元测试 case，逐步验证。

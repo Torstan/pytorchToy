@@ -39,6 +39,12 @@ public:
     int storage_offset_ = 0;
     DeviceType device_ = DeviceType::CPU;
     bool requires_grad_ = false;
+
+    // 版本计数器 — 每次 in-place 修改时递增，用于 autograd 检测
+    int version_counter_ = 0;
+
+    void bump_version() { version_counter_++; }
+    int version() const { return version_counter_; }
 public:
     // 标准构造函数：分配新 storage，填充初始值
     TensorImpl(std::vector<int> sizes, float fill_value = 0.0f)

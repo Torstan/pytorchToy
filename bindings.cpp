@@ -11,7 +11,13 @@
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <pybind11/functional.h>
 #include "ops.h"
+#include "autograd/variable.h"
+#include "autograd/function.h"
+#include "autograd/grad_ops.h"
+#include "autograd/engine.h"
+#include "autograd/py_function.h"
 
 namespace py = pybind11;
 
@@ -135,11 +141,38 @@ PYBIND11_MODULE(_C, m) {
         .def("__copy__", [](const Tensor& t) {
             return Tensor(t);
         })
+        // 逻辑平坦索引的读/写（stride 感知）
+        .def("flat_get", [](const Tensor& t, int i) {
+            return t.unsafeGetTensorImpl()->read_logical(i);
+        })
+        .def("flat_set", [](Tensor& t, int i, float v) {
+            auto* impl = t.unsafeGetTensorImpl();
+            if (impl->is_contiguous()) {
+                impl->data_ptr()[i] = v;
+            } else {
+                // 非连续时计算实际偏移
+                int offset = impl->storage_offset_;
+                int idx = i;
+                for (int d = impl->dim() - 1; d >= 0; d--) {
+                    int coord = idx % impl->sizes_[d];
+                    idx /= impl->sizes_[d];
+                    offset += coord * impl->strides_[d];
+                }
+                impl->storage_->data[offset] = v;
+            }
+        })
         // 算子方法 + 运算符重载（由 codegen.py 从 native_functions.yaml 自动生成）
 #include "generated/tensor_bindings.inl"
         // 演示 TensorImpl 的共享（多个 Tensor 可以指向同一个 TensorImpl）
         .def("data_ptr_id", [](const Tensor& t) {
             return reinterpret_cast<uintptr_t>(t.unsafeGetTensorImpl());
+        })
+        // 版本计数 — 用于 autograd in-place 检测
+        .def("_version", [](const Tensor& t) {
+            return t.unsafeGetTensorImpl()->version();
+        })
+        .def("_bump_version", [](Tensor& t) {
+            t.unsafeGetTensorImpl()->bump_version();
         })
         // Storage 指针 ID — 用于验证 view 操作是否共享同一块内存
         .def("storage_data_ptr", [](const Tensor& t) {
@@ -166,4 +199,76 @@ PYBIND11_MODULE(_C, m) {
 
     // 模块级算子函数（由 codegen.py 从 native_functions.yaml 自动生成）
 #include "generated/module_bindings.inl"
+
+    // ============================================================
+    // Autograd 绑定
+    // ============================================================
+
+    // --- VariableImpl ---
+    py::class_<VariableImpl, std::shared_ptr<VariableImpl>>(m, "VariableImpl")
+        .def(py::init<Tensor, bool, bool>(),
+             py::arg("data"), py::arg("requires_grad") = false, py::arg("volatile_") = false)
+        .def_readwrite("data", &VariableImpl::data)
+        .def_readwrite("grad", &VariableImpl::grad)
+        .def_readwrite("grad_defined", &VariableImpl::grad_defined)
+        .def_readwrite("requires_grad", &VariableImpl::requires_grad)
+        .def_readwrite("is_volatile", &VariableImpl::is_volatile)
+        .def_readwrite("output_index", &VariableImpl::output_index)
+        .def("accumulate_grad", &VariableImpl::accumulate_grad)
+        .def("run_hooks", &VariableImpl::run_hooks)
+        .def("add_hook", [](VariableImpl& self, std::function<void(Tensor&)> hook) {
+            self.hooks.push_back(std::move(hook));
+        })
+        // creator 的 getter/setter（shared_ptr<AutogradFunction>）
+        .def("get_creator", [](VariableImpl& self) -> std::shared_ptr<AutogradFunction> {
+            return self.creator;
+        })
+        .def("set_creator", [](VariableImpl& self, std::shared_ptr<AutogradFunction> fn) {
+            self.creator = std::move(fn);
+        });
+
+    // --- AutogradFunction 基类 ---
+    py::class_<AutogradFunction, std::shared_ptr<AutogradFunction>>(m, "AutogradFunction")
+        .def_readwrite("num_inputs", &AutogradFunction::num_inputs)
+        .def_readwrite("requires_grad", &AutogradFunction::requires_grad)
+        .def("add_previous_function", [](AutogradFunction& self,
+                                          std::shared_ptr<AutogradFunction> prev_fn, int idx) {
+            InputInfo info;
+            info.fn = std::move(prev_fn);
+            info.output_index = idx;
+            info.variable = nullptr;
+            self.inputs.push_back(std::move(info));
+        })
+        .def("add_leaf_variable", [](AutogradFunction& self,
+                                      std::shared_ptr<VariableImpl> var) {
+            InputInfo info;
+            info.fn = nullptr;
+            info.output_index = 0;
+            info.variable = var.get();
+            self.inputs.push_back(std::move(info));
+        })
+        .def("apply", &AutogradFunction::apply);
+
+    // --- PyFunction（Python 自定义 Function 的 C++ 桥接）---
+    py::class_<PyFunction, AutogradFunction, std::shared_ptr<PyFunction>>(m, "PyFunction")
+        .def(py::init<py::object>());
+
+    // --- 内置 backward 函数 ---
+    py::class_<MulBackward, AutogradFunction, std::shared_ptr<MulBackward>>(m, "MulBackward")
+        .def(py::init<Tensor, Tensor>());
+
+    py::class_<MulScalarBackward, AutogradFunction, std::shared_ptr<MulScalarBackward>>(m, "MulScalarBackward")
+        .def(py::init<float>());
+
+    py::class_<SumBackward, AutogradFunction, std::shared_ptr<SumBackward>>(m, "SumBackward")
+        .def(py::init<std::vector<int>>());
+
+    py::class_<AddBackward, AutogradFunction, std::shared_ptr<AddBackward>>(m, "AddBackward")
+        .def(py::init<>());
+
+    // --- Engine ---
+    m.def("engine_backward", [](std::shared_ptr<AutogradFunction> root_fn,
+                                 Tensor grad_output, bool retain_graph) {
+        Engine::backward(std::move(root_fn), std::move(grad_output), retain_graph);
+    }, py::arg("root_fn"), py::arg("grad_output"), py::arg("retain_graph") = false);
 }
