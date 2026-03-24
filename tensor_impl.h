@@ -2,7 +2,6 @@
 
 #include "intrusive_ptr.h"
 #include <vector>
-#include <atomic>
 #include <memory>
 #include <stdexcept>
 #include <string>
