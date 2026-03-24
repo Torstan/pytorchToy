@@ -40,8 +40,10 @@ tensor_base.o: tensor_base.cpp tensor_base.h tensor_impl.h
 	@echo ">>> 编译 tensor_base.o (不依赖算子定义)"
 	$(CXX) $(CXXFLAGS) -I$(PYTHON_INCLUDE) -I. -c tensor_base.cpp -o $@
 
-bindings.o: bindings.cpp ops.h tensor.h tensor_base.h tensor_impl.h $(GENERATED)
-	@echo ">>> 编译 bindings.o (依赖算子定义)"
+AUTOGRAD_HEADERS := autograd/variable.h autograd/function.h autograd/grad_ops.h autograd/engine.h autograd/py_function.h
+
+bindings.o: bindings.cpp ops.h tensor.h tensor_base.h tensor_impl.h $(GENERATED) $(AUTOGRAD_HEADERS)
+	@echo ">>> 编译 bindings.o (依赖算子定义 + autograd)"
 	$(CXX) $(CXXFLAGS) -I$(PYBIND11_INCLUDE) -I$(PYTHON_INCLUDE) -I. -c bindings.cpp -o $@
 
 $(TARGET): tensor_base.o bindings.o

@@ -1,4 +1,6 @@
 *.o
 *.so
 *.a
+*.pyc
+__pycache__
 generated
