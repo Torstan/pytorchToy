@@ -5,7 +5,9 @@
 - **`TensorImpl → TensorBase → Tensor` 三层类结构**
 - **Storage / Stride / View 机制**（零拷贝的 transpose、slice、reshape、expand）
 - **代码生成（codegen）**与**分离编译**减少增量编译时间
-- **侵入式引用计数**（ 模板 `IntrusivePtr<T>`）
+- **侵入式引用计数**（模板 `IntrusivePtr<T>`）
+- **Autograd 自动微分**（C++ 反向传播引擎 + Python Variable/Function API）
+- **版本计数 & In-place 检测**（save_for_backward 版本校验、mark_dirty 支持）
 
 ### 核心流程
 
@@ -68,12 +70,12 @@ TensorImplPtr               ← IntrusivePtr<TensorImpl> 的类型别名
 
 ```
 pytorchToy/
-├── tensor_impl.h            # Storage + TensorImpl
+├── tensor_impl.h            # Storage + TensorImpl（含版本计数器）
 ├── tensor_base.h            # IntrusivePtr<T> 模板 + TensorImplPtr + TensorBase
 ├── tensor_base.cpp          # TensorBase 独立编译单元（repr 实现）
 ├── tensor.h                 # Tensor 类（包含 generated/tensor_methods.h）
 ├── ops.h                    # native 命名空间：算子 kernel + view 操作 + stride 辅助
-├── bindings.cpp             # pybind11 Python 绑定层
+├── bindings.cpp             # pybind11 Python 绑定层（Tensor + Autograd）
 ├── native_functions.yaml    # 算子定义（模拟 PyTorch 的 native_functions.yaml）
 ├── codegen.py               # 代码生成器（模拟 PyTorch 的 torchgen）
 ├── generated/               # 自动生成的文件（勿手动修改）
@@ -81,6 +83,21 @@ pytorchToy/
 │   ├── dispatch.h           #   Tensor 方法实现（调用 native kernel）
 │   ├── tensor_bindings.inl  #   pybind11 Tensor 算子绑定
 │   └── module_bindings.inl  #   pybind11 模块级算子绑定
+├── autograd/                # C++ Autograd 引擎
+│   ├── function.h           #   AutogradFunction 基类 + InputInfo
+│   ├── variable.h           #   VariableImpl（梯度存储、计算图链接）
+│   ├── grad_ops.h           #   内置 backward 实现（Mul/Add/Sum/MulScalar）
+│   ├── engine.h             #   反向传播引擎（拓扑排序 + 梯度分发）
+│   └── py_function.h        #   PyFunction 桥接（C++ → Python backward 回调）
+├── torch/                   # Python 包
+│   ├── __init__.py          #   导出 Tensor, FloatTensor, zeros, ones, randn 等
+│   ├── tensor.py            #   Python Tensor 包装类（含版本追踪）
+│   └── autograd/
+│       ├── __init__.py      #   导出 Variable, Function
+│       ├── variable.py      #   Variable 类（backward, hooks, 运算符重载）
+│       └── function.py      #   Function 基类（save_for_backward 版本检查, mark_dirty）
+├── test/
+│   └── test_autograd.py     # Autograd 测试（45 checks）
 ├── Makefile                 # 构建脚本（分离编译 + codegen）
 ├── demo.py                  # Python 演示 & 测试脚本
 └── requirements.txt         # Python 依赖
@@ -88,7 +105,87 @@ pytorchToy/
 
 ---
 
-## 3. 算子与 View 操作一览
+## 3. Autograd 自动微分
+
+### 架构概览
+
+```
+Python 层                              C++ 层
+─────────                              ──────
+Variable  ──── 持有 ────→  VariableImpl（data, grad, creator）
+    │                           │
+Function.__call__()             │
+    │                           │
+    ├─ forward() → 构建计算图    │
+    │    save_for_backward()    │
+    │    mark_dirty()           │
+    │                           │
+    └─ backward() ←── Engine ←──┘
+         │              │
+    PyFunction 桥接    拓扑排序 + 梯度分发
+    (C++ ↔ Python)     (Kahn 算法)
+```
+
+### 计算图构建（前向）
+
+每次 Variable 运算（`*`, `+`, `sum()`, 自定义 Function）会：
+1. 计算前向结果
+2. 创建对应的 `AutogradFunction` 节点（如 `MulBackward`, `PyFunction`）
+3. 将输入边（`InputInfo`）连接到上游函数节点或叶子变量
+
+### 反向传播（Engine）
+
+`Engine::backward()` 从根节点出发：
+1. **拓扑排序**（Kahn 算法）确定执行顺序
+2. 按序调用每个节点的 `apply(grad_outputs)`
+3. 将返回的 `grad_inputs` 分发给上游
+4. 叶子节点的梯度累加到 `VariableImpl.grad`，并执行 hooks
+
+### 内置 Backward 函数
+
+| 节点 | Forward | Backward |
+|------|---------|----------|
+| `MulBackward` | `z = a * b` | `grad_a = grad * b, grad_b = grad * a` |
+| `MulScalarBackward` | `y = x * s` | `grad_x = grad * s` |
+| `AddBackward` | `z = a + b` | `grad_a = grad, grad_b = grad` |
+| `SumBackward` | `s = sum(x)` | `grad_x = expand(grad, x.shape)` |
+
+### 自定义 Function
+
+```python
+class Square(Function):
+    def forward(self, x):
+        self.save_for_backward(x)
+        return x * x
+
+    def backward(self, grad_output):
+        x, = self.saved_tensors
+        return 2 * x * grad_output
+
+y = Square()(x)  # 前向 + 构建计算图
+y.backward()      # 反向传播
+```
+
+### 版本计数 & In-place 检测
+
+每个 `TensorImpl` 持有 `version_counter_`，在 in-place 操作时递增：
+
+- `save_for_backward()` 记录张量及其当前版本号
+- `saved_tensors` 访问时检查版本是否一致，不一致则抛出 `RuntimeError`
+- `mark_dirty()` 声明 forward 中的 in-place 修改，使版本检查正确跳过
+
+```python
+class InplaceOp(Function):
+    def forward(self, x):
+        self.save_for_backward(x)
+        self.mark_dirty(x)      # 声明 x 将被 in-place 修改
+        x[0] = x[0] * 2         # in-place 修改
+        return x
+```
+
+---
+
+## 4. 算子与 View 操作一览
 
 ### 计算算子
 
@@ -130,7 +227,7 @@ pytorchToy/
 
 ---
 
-## 4. 编译依赖关系
+## 5. 编译依赖关系
 
 ```
                     native_functions.yaml
@@ -158,7 +255,7 @@ tensor_base.o               │            bindings.o
 
 ---
 
-## 5. 使用方法
+## 6. 使用方法
 
 ```bash
 # 安装依赖
@@ -169,6 +266,9 @@ make all
 
 # 运行演示 & 测试
 make run
+
+# 运行 autograd 测试（45 checks）
+PYTHONPATH=. python3 test/test_autograd.py
 
 # 验证增量编译（观察 tensor_base.o 不会被重编译）
 make demo_codegen
@@ -185,13 +285,14 @@ make clean
 
 ---
 
-## 6. 与 PyTorch 的对应关系
+## 7. 与 PyTorch 的对应关系
 
 | 本项目 | PyTorch |
 |--------|---------|
 | `IntrusivePtr<T>` | `c10::intrusive_ptr<T>` |
 | `TensorImplPtr` | `c10::intrusive_ptr<TensorImpl>` |
 | `TensorImpl` | `c10/core/TensorImpl.h` |
+| `TensorImpl::version_counter_` | `c10::VariableVersion` |
 | `Storage` | `c10::StorageImpl` |
 | `TensorBase` | `aten/src/ATen/core/TensorBase.h` |
 | `Tensor` | `aten/src/ATen/templates/TensorBody.h` |
@@ -199,3 +300,11 @@ make clean
 | `bindings.cpp` | `torch/csrc/` (pybind11 绑定) |
 | `native_functions.yaml` | `aten/src/ATen/native/native_functions.yaml` |
 | `codegen.py` | `torchgen/` |
+| `AutogradFunction` | `torch::autograd::Node` |
+| `Engine` | `torch::autograd::Engine` |
+| `VariableImpl` | `torch::autograd::AutogradMeta` |
+| `PyFunction` | `torch::autograd::PyNode` |
+| `Variable` (Python) | `torch.autograd.Variable` (0.1.x) / `torch.Tensor` (modern) |
+| `Function` (Python) | `torch.autograd.Function` |
+| `save_for_backward` 版本检查 | `SavedVariable` 版本校验 |
+| `mark_dirty` | `torch.autograd.Function.mark_dirty` |
