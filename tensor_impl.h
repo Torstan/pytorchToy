@@ -1,34 +1,12 @@
 #pragma once
+
+#include "intrusive_ptr.h"
 #include <vector>
 #include <atomic>
 #include <memory>
 #include <stdexcept>
 #include <string>
 
-// ============================================================
-// 模拟 c10::intrusive_ptr_target
-// 对应 PyTorch: c10/util/intrusive_ptr.h
-//
-// 所有需要被 IntrusivePtr 管理的对象必须继承此基类。
-// 引用计数存储在对象自身中，避免像 shared_ptr 那样额外分配控制块。
-// ============================================================
-
-class IntrusivePtrTarget {
-public:
-    mutable std::atomic<int> refcount_{1};
-
-    IntrusivePtrTarget() = default;
-    IntrusivePtrTarget(const IntrusivePtrTarget&) : refcount_(1) {}
-    IntrusivePtrTarget& operator=(const IntrusivePtrTarget&) { return *this; }
-    virtual ~IntrusivePtrTarget() = default;
-
-    void retain() const { refcount_.fetch_add(1); }
-    void release() const {
-        if (refcount_.fetch_sub(1) == 1) {
-            delete this;
-        }
-    }
-};
 
 // ============================================================
 // 模拟 c10::TensorImpl
@@ -80,6 +58,9 @@ public:
         , sizes_(std::move(sizes))
         , strides_(std::move(strides))
         , storage_offset_(storage_offset) {}
+
+    TensorImpl(const TensorImpl&) = delete;
+    TensorImpl& operator=(const TensorImpl&) = delete;
 
     int dim() const { return static_cast<int>(sizes_.size()); }
 

@@ -5,7 +5,7 @@
 - **`TensorImpl → TensorBase → Tensor` 三层类结构**
 - **Storage / Stride / View 机制**（零拷贝的 transpose、slice、reshape、expand）
 - **代码生成（codegen）**与**分离编译**减少增量编译时间
-- **侵入式引用计数**（`IntrusivePtrTarget` + 模板 `IntrusivePtr<T>`）
+- **侵入式引用计数**（ 模板 `IntrusivePtr<T>`）
 
 ### 核心流程
 
@@ -24,7 +24,7 @@ native_functions.yaml  →  codegen.py  →  generated/*.h  →  编译链接
 
 | 层级 | 本项目 | PyTorch 对应 | 职责 |
 |------|--------|-------------|------|
-| 底层 | `TensorImpl` | `c10/core/TensorImpl.h` | 持有数据（Storage）和元信息，继承 IntrusivePtrTarget |
+| 底层 | `TensorImpl` | `c10/core/TensorImpl.h` | 持有数据（Storage）和元信息|
 | 中层 | `TensorBase` | `aten/src/ATen/core/TensorBase.h` | 侵入式智能指针句柄，只有元信息方法 |
 | 顶层 | `Tensor` | `aten/src/ATen/templates/TensorBody.h` | 继承 TensorBase，增加算子方法 |
 
@@ -56,10 +56,7 @@ Tensor a (2x3)           Tensor at = a.transpose(0,1) (3x2)
 ### 侵入式引用计数
 
 ```
-IntrusivePtrTarget          ← 基类，持有 atomic<int> refcount_
-    └─ TensorImpl           ← 继承基类，自动获得引用计数能力
-
-IntrusivePtr<T>             ← 通用模板智能指针，T 须继承 IntrusivePtrTarget
+IntrusivePtr<T>             ← 通用模板智能指针
 TensorImplPtr               ← IntrusivePtr<TensorImpl> 的类型别名
 ```
 
@@ -71,7 +68,7 @@ TensorImplPtr               ← IntrusivePtr<TensorImpl> 的类型别名
 
 ```
 pytorchToy/
-├── tensor_impl.h            # IntrusivePtrTarget 基类 + Storage + TensorImpl
+├── tensor_impl.h            # Storage + TensorImpl
 ├── tensor_base.h            # IntrusivePtr<T> 模板 + TensorImplPtr + TensorBase
 ├── tensor_base.cpp          # TensorBase 独立编译单元（repr 实现）
 ├── tensor.h                 # Tensor 类（包含 generated/tensor_methods.h）
@@ -192,7 +189,6 @@ make clean
 
 | 本项目 | PyTorch |
 |--------|---------|
-| `IntrusivePtrTarget` | `c10::intrusive_ptr_target` |
 | `IntrusivePtr<T>` | `c10::intrusive_ptr<T>` |
 | `TensorImplPtr` | `c10::intrusive_ptr<TensorImpl>` |
 | `TensorImpl` | `c10/core/TensorImpl.h` |
