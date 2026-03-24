@@ -240,7 +240,7 @@ tensor_base.o               │            bindings.o
   ← tensor_base.cpp         │              ← bindings.cpp
   ← tensor_base.h           │              ← ops.h, tensor.h
   ← tensor_impl.h           │              ← tensor_base.h, tensor_impl.h
-  (不依赖 generated/*)      │              ← generated/*
+  ← generated/*             │              ← generated/*
           │                                      │
           └──────────── _C.so ───────────────────┘
 ```
