@@ -45,17 +45,6 @@ PYBIND11_MODULE(_C, m) {
     m.doc() = "Mini PyTorch: 模拟 TensorImpl → TensorBase → Tensor 三层结构";
 
     // ============================================================
-    // 绑定 TensorImpl（通常不直接暴露给 Python，这里仅供演示）
-    // 对应 PyTorch: c10/core/TensorImpl.h
-    // ============================================================
-    py::class_<TensorImpl>(m, "TensorImpl")
-        .def("dim", &TensorImpl::dim)
-        .def("numel", &TensorImpl::numel)
-        .def_readonly("sizes", &TensorImpl::sizes_)
-        .def_readonly("strides", &TensorImpl::strides_)
-        .def_readwrite("requires_grad", &TensorImpl::requires_grad_);
-
-    // ============================================================
     // 绑定 TensorBase — 不包含算子方法
     // 对应 PyTorch: aten/src/ATen/core/TensorBase.h
     // ============================================================

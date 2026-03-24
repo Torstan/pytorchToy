@@ -1,5 +1,5 @@
 CXX := g++
-CXXFLAGS := -std=c++17 -O2 -Wall -fPIC
+CXXFLAGS := -std=c++17 -O0 -g -Wall -fPIC
 
 PYBIND11_INCLUDE := $(shell python3 -c "import pybind11; print(pybind11.get_include())")
 PYTHON_INCLUDE := $(shell python3 -c "import sysconfig; print(sysconfig.get_path('include'))")
