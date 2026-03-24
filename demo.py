@@ -148,17 +148,31 @@ print("2. TensorImpl 引用计数共享")
 print("=" * 60)
 
 x = _C.Tensor([3], 5.0)
-assert x.use_count() >= 1
+assert x.use_count() == 1
 
-holder = [x]
-assert x.data_ptr_id() == holder[0].data_ptr_id(), "应共享同一个 TensorImpl"
+# Python 中 x2 = x 只是别名（同一个 Python 对象），不会增加 C++ 引用计数
+# 要创建一个新的 C++ Tensor 对象共享同一个 TensorImpl，需要 shallow_copy()
+x2 = x.shallow_copy()
+assert x.use_count() == 2, f"shallow_copy 后 use_count 应为 2，实际 {x.use_count()}"
+assert x2.use_count() == 2
+assert x.data_ptr_id() == x2.data_ptr_id(), "应共享同一个 TensorImpl"
+print(f"  shallow_copy: use_count={x.use_count()}, 共享 TensorImpl  ✓")
 
-# 通过 holder[0] 修改数据会影响 x（共享 TensorImpl）
-holder[0][0] = 99.0
+# 也支持 copy.copy()
+import copy
+x3 = copy.copy(x)
+assert x.use_count() == 3
+print(f"  copy.copy: use_count={x.use_count()}  ✓")
+del x3
+
+# 通过 x2 修改数据会影响 x（共享 TensorImpl → 同一块 storage）
+x2[0] = 99.0
 assert approx(x[0].item(), 99.0), "共享 TensorImpl，修改应互相可见"
-print(f"  引用计数共享 & 数据互通  ✓")
+print(f"  数据互通: x2[0]=99 → x[0]={x[0].item()}  ✓")
 
-del holder
+del x2
+assert x.use_count() == 1, "del x2 后 use_count 应恢复为 1"
+print(f"  del x2: use_count={x.use_count()}  ✓")
 
 # ============================================================
 print("\n" + "=" * 60)

@@ -126,6 +126,15 @@ PYBIND11_MODULE(_C, m) {
                 throw std::runtime_error("item() only for 0-dim tensors");
             return t.unsafeGetTensorImpl()->storage_->data[t.storage_offset()];
         })
+        // shallow_copy — 创建新的 Tensor 对象，共享同一个 TensorImpl（use_count+1）
+        // 类似 PyTorch 中多个 Tensor handle 指向同一个 TensorImpl
+        .def("shallow_copy", [](const Tensor& t) {
+            return Tensor(t);  // 调用拷贝构造，TensorImplPtr 引用计数 +1
+        })
+        // __copy__ 支持 copy.copy(t)，同样是浅拷贝共享 TensorImpl
+        .def("__copy__", [](const Tensor& t) {
+            return Tensor(t);
+        })
         // 算子方法 + 运算符重载（由 codegen.py 从 native_functions.yaml 自动生成）
 #include "generated/tensor_bindings.inl"
         // 演示 TensorImpl 的共享（多个 Tensor 可以指向同一个 TensorImpl）
