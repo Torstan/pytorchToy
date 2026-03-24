@@ -120,6 +120,11 @@ PYBIND11_MODULE(_C, m) {
             return Tensor(TensorImplPtr(vi));
         })
         .def("__setitem__", [](Tensor& t, int i, float v) { t.data_ptr()[i] = v; })
+        // _flat_item(i) — 按扁平索引读取元素（stride 感知，支持 0-dim tensor）
+        .def("_flat_item", [](const Tensor& t, int i) -> float {
+            if (t.is_contiguous()) return t.data_ptr()[i];
+            return native::read_elem(t, i);
+        })
         // item() — 从 0-dim 标量 tensor 取出 float 值，类似 PyTorch
         .def("item", [](const Tensor& t) {
             if (t.dim() != 0)
