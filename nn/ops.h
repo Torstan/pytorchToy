@@ -823,4 +823,40 @@ inline Tensor cross_entropy_backward(const Tensor& grad_output,
     return grad_input;
 }
 
+// ============================================================
+// Adam optimizer step (C++ kernel)
+// 对单个参数就地更新: param, m, v
+// ============================================================
+
+// adam_step: 就地更新单个参数
+// param: 参数张量 (requires_grad, 有 grad)
+// m, v: 一阶和二阶矩估计
+// 返回 true 如果实际更新了（有梯度），false 如果跳过
+inline bool adam_step(Tensor& param, Tensor& m, Tensor& v,
+                      float lr, float beta1, float beta2, float eps, int t) {
+    auto* impl = param.unsafeGetTensorImpl();
+    if (!impl->has_grad()) return false;
+
+    int n = param.numel();
+    float* p_data = param.data_ptr();
+    float* g_data = impl->grad_storage_->data_ptr();
+    float* m_data = m.data_ptr();
+    float* v_data = v.data_ptr();
+
+    float bc1 = 1.0f - std::pow(beta1, (float)t);
+    float bc2 = 1.0f - std::pow(beta2, (float)t);
+
+    for (int i = 0; i < n; i++) {
+        float g = g_data[i];
+        float mi = beta1 * m_data[i] + (1.0f - beta1) * g;
+        float vi = beta2 * v_data[i] + (1.0f - beta2) * g * g;
+        m_data[i] = mi;
+        v_data[i] = vi;
+        float m_hat = mi / bc1;
+        float v_hat = vi / bc2;
+        p_data[i] -= lr * m_hat / (std::sqrt(v_hat) + eps);
+    }
+    return true;
+}
+
 } // namespace nn

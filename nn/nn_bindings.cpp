@@ -157,4 +157,12 @@ PYBIND11_MODULE(_nn_C, m) {
         return py::make_tuple(result.loss, result.softmax_output);
     });
     m.def("cross_entropy_backward", &nn::cross_entropy_backward);
+
+    // ============================================================
+    // Adam optimizer step (C++ kernel)
+    // ============================================================
+    m.def("adam_step", &nn::adam_step,
+          py::arg("param"), py::arg("m"), py::arg("v"),
+          py::arg("lr"), py::arg("beta1"), py::arg("beta2"),
+          py::arg("eps"), py::arg("t"));
 }

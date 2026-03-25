@@ -55,8 +55,17 @@ public:
                 if (info.fn) {
                     // 非叶子：传给上游函数节点
                     grad_buffer[info.fn.get()].push_back(grad_inputs[i]);
+                } else if (info.leaf) {
+                    // 新系统叶子：累加梯度到 TensorImpl
+                    if (info.leaf->requires_grad_) {
+                        Tensor g = grad_inputs[i];
+                        Tensor cg = g.is_contiguous() ? g : native::contiguous(g);
+                        info.leaf->accumulate_grad(
+                            cg.data_ptr(), cg.numel(),
+                            std::vector<int>(cg.sizes()));
+                    }
                 } else if (info.variable) {
-                    // 叶子：累加梯度到 VariableImpl
+                    // System A 兼容：累加梯度到 VariableImpl
                     if (info.variable->requires_grad) {
                         info.variable->accumulate_grad(grad_inputs[i]);
                         info.variable->run_hooks();
