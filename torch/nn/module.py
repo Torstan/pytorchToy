@@ -117,9 +117,9 @@ class Module:
         return self.train(False)
 
     def zero_grad(self):
-        """清零所有参数的梯度"""
+        """清零所有参数的梯度（委托 C++ TensorImpl.zero_grad）"""
         for param in self.parameters():
-            param.grad = None
+            param._c.zero_grad()
 
     def state_dict(self):
         """返回模型状态字典"""

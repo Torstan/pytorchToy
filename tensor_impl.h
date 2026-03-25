@@ -6,6 +6,9 @@
 #include <stdexcept>
 #include <string>
 
+// 前向声明 autograd 节点
+class AutogradFunction;
+
 
 // ============================================================
 // 模拟 c10::TensorImpl
@@ -43,8 +46,52 @@ public:
     // 版本计数器 — 每次 in-place 修改时递增，用于 autograd 检测
     int version_counter_ = 0;
 
+    // ---- autograd 字段 ----
+    std::shared_ptr<Storage> grad_storage_;           // 梯度数据（lazy 分配）
+    std::vector<int> grad_sizes_;                     // 梯度形状
+    bool grad_defined_ = false;                       // 是否有梯度
+
+    std::shared_ptr<AutogradFunction> creator_;       // 创建此张量的 backward 节点
+    int output_index_ = 0;                            // 在 creator 输出中的位置
+
     void bump_version() { version_counter_++; }
     int version() const { return version_counter_; }
+
+    // ---- autograd 方法 ----
+
+    // 设置/获取 creator
+    void set_creator(std::shared_ptr<AutogradFunction> fn, int idx = 0) {
+        creator_ = std::move(fn);
+        output_index_ = idx;
+    }
+    std::shared_ptr<AutogradFunction> get_creator() const { return creator_; }
+    int get_output_index() const { return output_index_; }
+
+    bool has_grad() const { return grad_defined_; }
+
+    void zero_grad() {
+        if (grad_defined_ && grad_storage_) {
+            float* p = grad_storage_->data_ptr();
+            int n = 1;
+            for (int s : grad_sizes_) n *= s;
+            for (int i = 0; i < n; i++) p[i] = 0.0f;
+        }
+        grad_defined_ = false;
+    }
+
+    // 累加梯度（从 VariableImpl::accumulate_grad 移植）
+    void accumulate_grad(const float* src_data, int n, const std::vector<int>& shape) {
+        if (!grad_defined_) {
+            grad_sizes_ = shape;
+            grad_storage_ = std::make_shared<Storage>(n, 0.0f);
+            grad_defined_ = true;
+        }
+        float* dst = grad_storage_->data_ptr();
+        for (int i = 0; i < n; i++) {
+            dst[i] += src_data[i];
+        }
+    }
+
 public:
     // 标准构造函数：分配新 storage，填充初始值
     TensorImpl(std::vector<int> sizes, float fill_value = 0.0f)

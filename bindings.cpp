@@ -16,8 +16,10 @@
 #include "autograd/variable.h"
 #include "autograd/function.h"
 #include "autograd/grad_ops.h"
+#include "autograd/nn_grad_ops.h"
 #include "autograd/engine.h"
 #include "autograd/py_function.h"
+#include "autograd/autograd_ops.h"
 
 namespace py = pybind11;
 
@@ -166,7 +168,36 @@ PYBIND11_MODULE(_C, m) {
         // Storage 指针 ID — 用于验证 view 操作是否共享同一块内存
         .def("storage_data_ptr", [](const Tensor& t) {
             return reinterpret_cast<uintptr_t>(t.storage()->data.data());
-        });
+        })
+        // ---- autograd 新接口 ----
+        .def("has_grad", &Tensor::has_grad)
+        .def("grad", [](const Tensor& t) -> py::object {
+            auto* impl = t.unsafeGetTensorImpl();
+            if (!impl->has_grad()) return py::none();
+            // 创建一个 Tensor 包装 grad storage
+            auto* gi = new TensorImpl(impl->grad_storage_, 0,
+                                       std::vector<int>(impl->grad_sizes_),
+                                       std::vector<int>());
+            // 计算 contiguous strides
+            auto& sizes = gi->sizes_;
+            gi->strides_.resize(sizes.size());
+            int stride = 1;
+            for (int i = (int)sizes.size() - 1; i >= 0; i--) {
+                gi->strides_[i] = stride;
+                stride *= sizes[i];
+            }
+            return py::cast(Tensor(TensorImplPtr(gi)));
+        })
+        .def("zero_grad", &Tensor::zero_grad)
+        .def("get_creator", [](const Tensor& t) -> py::object {
+            auto c = t.get_creator();
+            if (!c) return py::none();
+            return py::cast(c);
+        })
+        .def("has_creator", [](const Tensor& t) {
+            return t.get_creator() != nullptr;
+        })
+        .def("set_requires_grad", &Tensor::set_requires_grad);
 
     // ============================================================
     // 模块级工厂函数
@@ -253,11 +284,90 @@ PYBIND11_MODULE(_C, m) {
         .def(py::init<std::vector<int>>());
 
     py::class_<AddBackward, AutogradFunction, std::shared_ptr<AddBackward>>(m, "AddBackward")
-        .def(py::init<>());
+        .def(py::init<std::vector<int>, std::vector<int>>());
 
     // --- Engine ---
     m.def("engine_backward", [](std::shared_ptr<AutogradFunction> root_fn,
                                  Tensor grad_output, bool retain_graph) {
         Engine::backward(std::move(root_fn), std::move(grad_output), retain_graph);
     }, py::arg("root_fn"), py::arg("grad_output"), py::arg("retain_graph") = false);
+
+    // ============================================================
+    // C++ Autograd 算子
+    // ============================================================
+    m.def("autograd_add", &autograd::add);
+    m.def("autograd_add_scalar", &autograd::add_scalar);
+    m.def("autograd_sub", &autograd::sub);
+    m.def("autograd_sub_scalar", &autograd::sub_scalar);
+    m.def("autograd_mul", &autograd::mul);
+    m.def("autograd_mul_scalar", &autograd::mul_scalar);
+    m.def("autograd_div", &autograd::div);
+    m.def("autograd_div_scalar", &autograd::div_scalar);
+    m.def("autograd_neg", &autograd::neg);
+    m.def("autograd_mm", &autograd::mm);
+    m.def("autograd_matmul", &autograd::matmul);
+    m.def("autograd_batched_matmul", &autograd::batched_matmul);
+    m.def("autograd_transpose", &autograd::transpose,
+          py::arg("input"), py::arg("d0"), py::arg("d1"));
+    m.def("autograd_view", &autograd::view,
+          py::arg("input"), py::arg("shape"));
+    m.def("autograd_expand", &autograd::expand,
+          py::arg("input"), py::arg("new_sizes"));
+    m.def("autograd_slice", &autograd::slice,
+          py::arg("input"), py::arg("dim"), py::arg("start"), py::arg("end"));
+    m.def("autograd_relu", &autograd::relu);
+    m.def("autograd_tanh", &autograd::tanh);
+    m.def("autograd_sum", &autograd::sum);
+    m.def("autograd_sum_dim", &autograd::sum_dim,
+          py::arg("input"), py::arg("dim"), py::arg("keepdim") = false);
+    m.def("autograd_linear", [](const Tensor& input, const Tensor& weight,
+                                  py::object bias_obj) {
+        bool has_bias = !bias_obj.is_none();
+        Tensor bias = has_bias ? py::cast<Tensor>(bias_obj) : native::empty({1});
+        return autograd::linear(input, weight, bias, has_bias);
+    }, py::arg("input"), py::arg("weight"), py::arg("bias") = py::none());
+    m.def("autograd_softmax", &autograd::softmax,
+          py::arg("input"), py::arg("dim"));
+    m.def("autograd_log_softmax", &autograd::log_softmax,
+          py::arg("input"), py::arg("dim"));
+    m.def("autograd_nll_loss", &autograd::nll_loss);
+    m.def("autograd_cross_entropy", &autograd::cross_entropy);
+    m.def("autograd_layer_norm", [](const Tensor& input, const Tensor& weight,
+                                      const Tensor& bias, float eps) {
+        return autograd::layer_norm(input, weight, bias, true, true, eps);
+    }, py::arg("input"), py::arg("weight"), py::arg("bias"), py::arg("eps") = 1e-5f);
+    m.def("autograd_embedding", &autograd::embedding);
+    m.def("autograd_mha", [](const Tensor& query, const Tensor& key, const Tensor& value,
+                               const Tensor& in_proj_weight, const Tensor& in_proj_bias,
+                               const Tensor& out_proj_weight, const Tensor& out_proj_bias,
+                               bool has_bias, int num_heads) {
+        return autograd::multihead_attention(
+            query, key, value, in_proj_weight, in_proj_bias,
+            out_proj_weight, out_proj_bias, has_bias, num_heads);
+    });
+
+    // backward 入口
+    m.def("autograd_backward", [](const Tensor& loss) {
+        autograd::backward(loss);
+    });
+
+    // grad mode 控制
+    m.def("set_grad_enabled", [](bool enabled) {
+        autograd::grad_mode_enabled = enabled;
+    });
+    m.def("is_grad_enabled", []() {
+        return autograd::grad_mode_enabled;
+    });
+
+    // --- 新增 backward 算子类绑定 (System A 兼容) ---
+    py::class_<SubBackward, AutogradFunction, std::shared_ptr<SubBackward>>(m, "SubBackward")
+        .def(py::init<std::vector<int>, std::vector<int>>());
+    py::class_<NegBackward, AutogradFunction, std::shared_ptr<NegBackward>>(m, "NegBackward")
+        .def(py::init<>());
+    py::class_<ReluBackward, AutogradFunction, std::shared_ptr<ReluBackward>>(m, "ReluBackward")
+        .def(py::init<Tensor>());
+    py::class_<TanhBackward, AutogradFunction, std::shared_ptr<TanhBackward>>(m, "TanhBackward")
+        .def(py::init<Tensor>());
+    py::class_<LinearBackward, AutogradFunction, std::shared_ptr<LinearBackward>>(m, "LinearBackward")
+        .def(py::init<Tensor, Tensor, bool>());
 }

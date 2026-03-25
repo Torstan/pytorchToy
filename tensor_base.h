@@ -50,6 +50,18 @@ public:
     // 获取底层 TensorImpl
     TensorImpl* unsafeGetTensorImpl() const { return impl_.get(); }
 
+    // ---- autograd 接口 ----
+    bool has_grad() const { return impl_->has_grad(); }
+    void zero_grad() { impl_->zero_grad(); }
+
+    void set_creator(std::shared_ptr<AutogradFunction> fn, int idx = 0) {
+        impl_->set_creator(std::move(fn), idx);
+    }
+    std::shared_ptr<AutogradFunction> get_creator() const {
+        return impl_->get_creator();
+    }
+    int get_output_index() const { return impl_->get_output_index(); }
+
     // 声明在此，实现在 tensor_base.cpp 中
     // 这样 TensorBase 拥有独立的编译单元，不依赖算子定义
     std::string repr() const;
