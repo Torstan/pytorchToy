@@ -6,13 +6,14 @@ PYTHON_INCLUDE := $(shell python3 -c "import sysconfig; print(sysconfig.get_path
 EXT_SUFFIX := $(shell python3 -c "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))")
 
 TARGET := _C$(EXT_SUFFIX)
+NN_TARGET := _nn_C$(EXT_SUFFIX)
 
 # 生成的文件（由 codegen.py 从 native_functions.yaml 生成）
 GENERATED := generated/tensor_methods.h generated/dispatch.h generated/tensor_bindings.inl generated/module_bindings.inl
 
 .PHONY: all clean run codegen demo_codegen
 
-all: $(TARGET)
+all: $(TARGET) $(NN_TARGET)
 
 # ============================================================
 # 代码生成: native_functions.yaml → generated/*.h
@@ -50,7 +51,20 @@ $(TARGET): tensor_base.o bindings.o
 	@echo ">>> 链接 $(TARGET)"
 	$(CXX) -shared tensor_base.o bindings.o -o $@
 
-run: $(TARGET)
+# ============================================================
+# nn 模块编译
+# ============================================================
+NN_HEADERS := nn/ops.h util/math.h util/tensor_ops.h
+
+nn_bindings.o: nn/nn_bindings.cpp $(NN_HEADERS) ops.h tensor.h tensor_base.h tensor_impl.h
+	@echo ">>> 编译 nn_bindings.o (nn C++ 内核)"
+	$(CXX) $(CXXFLAGS) -I$(PYBIND11_INCLUDE) -I$(PYTHON_INCLUDE) -I. -c nn/nn_bindings.cpp -o $@
+
+$(NN_TARGET): nn_bindings.o
+	@echo ">>> 链接 $(NN_TARGET)"
+	$(CXX) -shared nn_bindings.o -o $@
+
+run: $(TARGET) $(NN_TARGET)
 	python3 demo.py
 
 # ============================================================

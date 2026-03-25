@@ -11,12 +11,24 @@ import random
 # 导入 C++ 扩展模块
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import _C
+import _nn_C
+
+
+# dtype 常量
+class _DType:
+    def __init__(self, name):
+        self.name = name
+    def __repr__(self):
+        return f"torch.{self.name}"
+
+float32 = _DType("float32")
+long = _DType("long")
 
 
 class Tensor:
     """Python 侧的 Tensor 包装类，包装 _C.Tensor"""
 
-    def __init__(self, c_tensor=None):
+    def __init__(self, c_tensor=None, requires_grad=False):
         if c_tensor is None:
             self._c = _C.Tensor([0])
         elif isinstance(c_tensor, _C.Tensor):
@@ -25,6 +37,10 @@ class Tensor:
             self._c = c_tensor._c
         else:
             raise TypeError(f"Tensor: unsupported init type {type(c_tensor)}")
+        self.requires_grad = requires_grad
+        self.grad = None
+        self._dtype = float32  # 默认 float32
+        self._grad_fn = None   # autograd graph 节点
 
     # ---- 基本属性 ----
 
@@ -67,6 +83,10 @@ class Tensor:
         return Tensor(result)
 
     @property
+    def shape(self):
+        return tuple(self._c.sizes())
+
+    @property
     def data(self):
         """兼容 Variable 接口：Tensor.data 返回自身"""
         return self
@@ -76,16 +96,130 @@ class Tensor:
         """版本计数器，用于 autograd in-place 检测"""
         return self._c._version()
 
+    # ---- Autograd 支持 ----
+
+    def backward(self):
+        """执行反向传播"""
+        from torch.autograd_engine import backward
+        backward(self)
+
+    def detach(self):
+        """返回共享数据但不跟踪梯度的新 Tensor"""
+        t = Tensor(self._c)
+        t.requires_grad = False
+        t.grad = None
+        t._grad_fn = None
+        return t
+
+    def numpy(self):
+        """转换为 numpy 数组"""
+        import numpy as np
+        sizes = list(self._c.sizes())
+        n = self.numel()
+        c = self._c if self._c.is_contiguous() else self._c.contiguous()
+        data = [c.flat_get(i) for i in range(n)]
+        if self._dtype is long:
+            arr = np.array(data, dtype=np.int64).reshape(sizes) if sizes else np.array(data[0], dtype=np.int64)
+        else:
+            arr = np.array(data, dtype=np.float32).reshape(sizes) if sizes else np.array(data[0], dtype=np.float32)
+        return arr
+
+    def squeeze(self, dim=None):
+        """去掉大小为 1 的维度"""
+        sizes = list(self._c.sizes())
+        if dim is not None:
+            if dim < 0:
+                dim = len(sizes) + dim
+            if sizes[dim] == 1:
+                new_sizes = sizes[:dim] + sizes[dim + 1:]
+                if not new_sizes:
+                    new_sizes = [1]
+                return self.view(new_sizes)
+            return self
+        new_sizes = [s for s in sizes if s != 1]
+        if not new_sizes:
+            new_sizes = [1]
+        return self.view(new_sizes)
+
     # ---- 索引 ----
 
     def __getitem__(self, idx):
         if isinstance(idx, int):
             result = Tensor(self._c[idx])
-            # 0-dim 结果返回 Python float（兼容旧版 PyTorch 行为）
             if result.dim() == 0:
                 return result.item()
             return result
+        elif isinstance(idx, slice):
+            return self._slice_dim(0, idx)
         elif isinstance(idx, tuple):
+            return self._multi_index(idx)
+        raise TypeError(f"unsupported index type: {type(idx)}")
+
+    def _slice_dim(self, dim, s):
+        """沿指定维度做 slice"""
+        sizes = self.size()
+        n = sizes[dim]
+        start, stop, step = s.indices(n)
+        if step != 1:
+            raise RuntimeError("step != 1 not supported")
+        result = Tensor(_nn_C.clone(self._c))
+        # 使用 C++ slice
+        from torch.tensor import Tensor as T
+        sliced = self._c
+        # 需要用 native::slice
+        import _C as _c_mod
+        # 手动构造 slice view
+        sizes_list = list(self._c.sizes())
+        strides_list = list(self._c.strides())
+        new_offset = self._c.storage_offset() + start * strides_list[dim]
+        new_sizes = list(sizes_list)
+        new_sizes[dim] = stop - start
+        # 通过 reshape 和 flat_get/set 实现
+        ct = self._c if self._c.is_contiguous() else self._c.contiguous()
+        result_c = _C.empty(new_sizes)
+        # 通用 N-dim slice copy
+        n_total = 1
+        for s_val in new_sizes:
+            n_total *= s_val
+        src_strides = []
+        stride = 1
+        for i in range(len(sizes_list) - 1, -1, -1):
+            src_strides.insert(0, stride)
+            stride *= sizes_list[i]
+
+        for flat_idx in range(n_total):
+            # 将 flat_idx 转为 new_sizes 坐标
+            coords = []
+            rem = flat_idx
+            for d in range(len(new_sizes)):
+                coords.append(rem // (n_total // new_sizes[d] if d == 0 else 1))
+            # 简化: 用递归方式
+            coords = []
+            rem = flat_idx
+            for d in range(len(new_sizes) - 1, -1, -1):
+                coords.insert(0, rem % new_sizes[d])
+                rem //= new_sizes[d]
+            # 映射到源坐标
+            src_coords = list(coords)
+            src_coords[dim] += start
+            # 计算源 flat idx
+            src_flat = 0
+            for d in range(len(sizes_list)):
+                src_flat += src_coords[d] * src_strides[d]
+            result_c.flat_set(flat_idx, ct.flat_get(src_flat))
+
+        t = Tensor(result_c)
+        # 传播 grad
+        if self.requires_grad or self._grad_fn is not None:
+            from torch.autograd_engine import record
+            record([t], [self], lambda go: [_zeros_like_and_scatter(self, go[0], dim, start, stop)], "slice")
+        return t
+
+    def _multi_index(self, idx):
+        """处理多维索引，支持 int 和 slice 混合"""
+        sizes = self.size()
+        # 如果全是 int, 用旧逻辑
+        if all(isinstance(i, int) for i in idx):
             result = self._c
             for i in idx:
                 result = result[i]
@@ -93,7 +227,28 @@ class Tensor:
             if t.dim() == 0:
                 return t.item()
             return t
-        raise TypeError(f"unsupported index type: {type(idx)}")
+
+        # 处理含 slice 的索引
+        current = self
+        dim_offset = 0
+        for dim_idx, index in enumerate(idx):
+            actual_dim = dim_idx - dim_offset
+            if isinstance(index, int):
+                # int 索引: 降维
+                sizes_list = current.size()
+                n = sizes_list[actual_dim]
+                if index < 0:
+                    index += n
+                current = current._slice_dim(actual_dim, slice(index, index + 1))
+                current = current.squeeze(actual_dim)
+                dim_offset += 1
+            elif isinstance(index, slice):
+                current = current._slice_dim(actual_dim, index)
+            elif index is None:
+                # None = unsqueeze
+                current = current.unsqueeze(actual_dim)
+                dim_offset -= 1
+        return current
 
     def __setitem__(self, idx, value):
         if isinstance(idx, int):
@@ -114,7 +269,20 @@ class Tensor:
 
     def __add__(self, other):
         if isinstance(other, Tensor):
-            return Tensor(self._c.add(other._c))
+            result = Tensor(_nn_C.broadcast_add(self._c, other._c))
+            # 传播 autograd
+            if (self.requires_grad or getattr(self, '_grad_fn', None)) or \
+               (other.requires_grad or getattr(other, '_grad_fn', None)):
+                from torch.autograd_engine import record
+                saved_self_shape = self.size()
+                saved_other_shape = other.size()
+                def backward_fn(grad_outputs):
+                    g = grad_outputs[0]
+                    ga = _reduce_grad(g, saved_self_shape)
+                    gb = _reduce_grad(g, saved_other_shape)
+                    return [ga, gb]
+                record([result], [self, other], backward_fn, "add")
+            return result
         elif isinstance(other, (int, float)):
             return self._apply_scalar(float(other), lambda a, b: a + b)
         return NotImplemented
@@ -182,7 +350,17 @@ class Tensor:
             shape = list(shape[0])
         else:
             shape = list(shape)
-        return Tensor(self._c.reshape(shape))
+        result = Tensor(self._c.reshape(shape))
+        # 传播 autograd 信息
+        if self.requires_grad or self._grad_fn is not None:
+            from torch.autograd_engine import record
+            saved_self = self
+            original_shape = self.size()
+            def backward_fn(grad_outputs):
+                g = grad_outputs[0]
+                return [g.view(original_shape)]
+            record([result], [self], backward_fn, "view")
+        return result
 
     def reshape(self, *shape):
         return self.view(*shape)
@@ -193,6 +371,7 @@ class Tensor:
         if dim < 0:
             dim = len(sizes) + 1 + dim
         new_sizes = sizes[:dim] + [1] + sizes[dim:]
+        # 直接调用 view 来保持 autograd 链
         return self.view(new_sizes)
 
     def expand(self, *sizes):
@@ -400,3 +579,122 @@ def randn(*shape):
             result.flat_set(i + 1, z1)
 
     return Tensor(result)
+
+
+def tensor(data, dtype=None):
+    """从嵌套 list/numpy array 创建 Tensor，支持 dtype"""
+    import numpy as np
+
+    if isinstance(data, np.ndarray):
+        flat = data.flatten().tolist()
+        shape = list(data.shape)
+    elif isinstance(data, (list, tuple)):
+        # 展平嵌套 list
+        arr = np.array(data)
+        flat = arr.flatten().tolist()
+        shape = list(arr.shape)
+    elif isinstance(data, (int, float)):
+        flat = [float(data)]
+        shape = [1]
+    else:
+        raise TypeError(f"tensor: unsupported data type {type(data)}")
+
+    c = _C.empty(shape)
+    for i, v in enumerate(flat):
+        c.flat_set(i, float(v))
+
+    t = Tensor(c)
+    if dtype is not None:
+        t._dtype = dtype
+    return t
+
+
+def randint(low, high, size):
+    """生成 [low, high) 范围内的随机整数张量"""
+    if isinstance(size, (list, tuple)):
+        size = list(size)
+    c = _nn_C.randint(low, high, size)
+    t = Tensor(c)
+    t._dtype = long
+    return t
+
+
+def argmax(input_tensor, dim=None):
+    """沿指定维度求最大值索引"""
+    if dim is None:
+        # 全局 argmax
+        n = input_tensor.numel()
+        max_val = input_tensor._c.flat_get(0)
+        max_idx = 0
+        for i in range(1, n):
+            v = input_tensor._c.flat_get(i)
+            if v > max_val:
+                max_val = v
+                max_idx = i
+        return Tensor(_C.Tensor([1], float(max_idx)))
+    result = _nn_C.argmax(input_tensor._c, dim)
+    t = Tensor(result)
+    t._dtype = long
+    return t
+
+
+# ============================================================
+# 内部辅助函数 (autograd 用)
+# ============================================================
+
+def _reduce_grad(grad, target_shape):
+    """将 grad 归约到 target_shape (处理广播的反向)"""
+    g_shape = grad.size()
+    t_shape = list(target_shape)
+
+    if g_shape == t_shape:
+        return grad
+
+    # 补齐维度
+    ndim_diff = len(g_shape) - len(t_shape)
+    t_shape_padded = [1] * ndim_diff + t_shape
+
+    # 沿广播维度求和
+    result = grad
+    for i in range(len(g_shape)):
+        if t_shape_padded[i] == 1 and g_shape[i] > 1:
+            result = Tensor(_nn_C.sum_dim(result._c, i, True))
+
+    # 去掉多余的前导维度
+    if ndim_diff > 0:
+        result = result.view(t_shape)
+
+    return result
+
+
+def _zeros_like_and_scatter(original, grad_slice, dim, start, stop):
+    """创建与 original 同形状的零张量，在 [start:stop] 位置填入 grad_slice"""
+    result = Tensor(_C.empty(original.size()))
+    sizes = original.size()
+    slice_sizes = grad_slice.size()
+
+    n_total = grad_slice.numel()
+    # 计算 strides
+    src_strides = []
+    stride = 1
+    for i in range(len(sizes) - 1, -1, -1):
+        src_strides.insert(0, stride)
+        stride *= sizes[i]
+
+    gs = grad_slice._c if grad_slice._c.is_contiguous() else grad_slice._c.contiguous()
+
+    for flat_idx in range(n_total):
+        coords = []
+        rem = flat_idx
+        for d in range(len(slice_sizes) - 1, -1, -1):
+            coords.insert(0, rem % slice_sizes[d])
+            rem //= slice_sizes[d]
+        # 映射到原始坐标
+        src_coords = list(coords)
+        src_coords[dim] += start
+        src_flat = 0
+        for d in range(len(sizes)):
+            src_flat += src_coords[d] * src_strides[d]
+        result._c.flat_set(src_flat, gs.flat_get(flat_idx))
+
+    return result
