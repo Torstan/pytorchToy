@@ -1,0 +1,28 @@
+实施计划
+
+1. 主题：在pytorchToy项目中增加神经网络(简称nn)的最核心的功能
+
+2. 背景：
+PyTorch 2.12.0 代码路径/mnt/d/ginobili/code/study/pytorch, 其中神经网络相关的功能在torch/nn文件夹.
+参考PyTorch 2.12.0 的原理和代码，实现nn的最核心的功能，为了简单起见，不必要的代码不用写。
+
+
+3. 实现原理：
+参考PyTorch 2.4.1 已经实现了完整的 nn 机制，支持参数管理，前向传播的定义，模型的保存与加载等功能，实现模型训练和推理。
+
+工作原理
+a) 参考pytorchToy/pytorch_2.4.1_nn。
+b) 为了简单起见，不用实现JIT机制。
+
+4. 要求：
+a) pytorchToy/torch/nn目录：python相关的代码。
+b) pytorchToy/nn目录：c++ nn引擎相关代码。
+c) pytorchToy/util目录：c++公共库相关代码。
+d) 在pytorchToy main分支上开发，不用参考其他分支代码。
+
+5. 测试用例:
+路径：/mnt/d/ginobili/code/test/pytorchToy/test/下的rnn.py和transformer.py。
+完成c++引擎和python相关功能开发后，验证测试用例能正常通过，如果失败，分析原因，并解决。
+
+6. 其它
+在开发过程中，可以在/mnt/d/ginobili/code/test/pytorchToy/test/下增加一些单元测试 case，逐步验证。

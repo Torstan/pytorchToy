@@ -1,0 +1,107 @@
+torch.nn.Module 实现原理
+一、核心数据结构
+Module 在 module.py:407 定义，其 __init__（L482）通过 super().__setattr__ 绕过自身的 __setattr__ 开销，初始化以下核心字典：
+
+属性	类型	用途
+_parameters	dict[str, Parameter|None]	存储可训练参数
+_buffers	dict[str, Tensor|None]	存储非参数状态（如 BatchNorm 的 running_mean）
+_modules	dict[str, Module|None]	存储子模块，构成树形结构
+_forward_hooks	OrderedDict	forward 后置钩子
+_forward_pre_hooks	OrderedDict	forward 前置钩子
+_backward_hooks	OrderedDict	反向传播钩子
+这三个核心字典（_parameters、_buffers、_modules）构成了 Module 的树形递归结构。
+
+二、属性拦截机制：__setattr__ / __getattr__
+这是 Module 最巧妙的设计。
+
+__setattr__（L1971）
+当你写 self.conv1 = nn.Conv2d(...) 时，__setattr__ 会自动判断类型并分发：
+
+
+value 是 Parameter?  → 存入 _parameters（调用 register_parameter）
+value 是 Module?     → 存入 _modules
+value 是 Buffer?     → 存入 _buffers（调用 register_buffer）
+其他                 → 存入普通 __dict__
+同时会做互斥清理：如果一个名字之前在 _parameters 中，现在赋值为一个 Module，会先从 _parameters 中删除。
+
+__getattr__（L1954）
+只有在常规 __dict__ 查找失败时才会触发，按 _parameters → _buffers → _modules 的顺序查找：
+
+
+def __getattr__(self, name):
+    if name in self._parameters: return self._parameters[name]
+    if name in self._buffers:    return self._buffers[name]
+    if name in self._modules:    return self._modules[name]
+    raise AttributeError(...)
+这样 model.conv1 就能透明地返回子模块，model.weight 就能返回参数。
+
+三、前向传播调用链
+当你调用 model(x) 时，调用链为：
+
+
+model(x)
+  → __call__  (= _wrapped_call_impl, 在 L1917 赋值)
+    → _wrapped_call_impl (L1774)
+        如果 _compiled_call_impl 不为 None（torch.compile 场景）:
+            调用编译后的版本
+        否则:
+            → _call_impl (L1782)
+_call_impl 是核心逻辑（L1782）：
+
+
+1. 快速路径：无任何 hook → 直接调用 self.forward()
+2. 慢速路径（有 hook）：
+   a. 收集 backward hooks
+   b. 执行 global + module 级别的 forward_pre_hooks（可修改输入）
+   c. 设置 backward hook 的 input hook
+   d. 调用 self.forward(*args, **kwargs)
+   e. 执行 global + module 级别的 forward_hooks（可修改输出）
+   f. 设置 backward hook 的 output hook
+   g. 异常时执行 always_call 标记的 hook
+注意 __call__ 是作为类属性赋值的（__call__ = _wrapped_call_impl），而不是定义为方法。这是为了让 torch.compile 可以替换 _compiled_call_impl 来劫持调用。
+
+四、递归遍历机制
+parameters()、buffers()、modules() 等方法通过递归遍历 _modules 树实现。以 named_parameters() 为例，它会 DFS 遍历所有子模块，yield 出每个模块的 _parameters 中的项，键名用 . 连接（如 conv1.weight）。
+
+state_dict() / load_state_dict() 同理——递归地收集/恢复所有参数和持久化 buffer。
+
+五、与 C++ 的协作
+PyTorch 中存在三个不同的 Module 概念：
+
+1. Python nn.Module（本文件）
+纯 Python 实现，是用户日常使用的核心类。与 C++ 的交互点：
+
+torch._C._log_api_usage_once：在 __init__ 中调用，用于使用统计
+torch._C._get_tracing_state()：在 _call_impl 中检查是否正在 JIT tracing
+_slow_forward：tracing 时使用，会向 trace graph 中记录 scope 信息
+2. C++ Frontend torch::nn::Module
+定义在 torch/csrc/api/include/torch/nn/module.h，是 C++ 用户用来构建模型的 API。与 Python 版本是平行对等的设计，不是 Python 版本的后端：
+
+
+class Module : public std::enable_shared_from_this<Module> {
+    OrderedDict<std::string, Tensor> parameters_;
+    OrderedDict<std::string, Tensor> buffers_;
+    OrderedDict<std::string, std::shared_ptr<Module>> children_;
+    bool is_training_ = true;
+};
+同样有 register_parameter、register_buffer、register_module，结构几乎一致。
+
+3. JIT torch::jit::Module（ScriptModule）
+定义在 torch/csrc/jit/api/module.h，继承自 Object（包装 c10::ivalue::Object）。这是 Python Module 通过 torch.jit.script() / torch.jit.trace() 编译后的产物。
+
+Python → JIT 的桥接流程：
+
+
+Python nn.Module
+    ↓ torch.jit.script()
+ConcreteModuleType (torch/csrc/jit/frontend/concrete_module_type.h)
+    → 分析 Python Module 的结构：参数、buffer、子模块、hook
+    → 构建 JIT 类型系统中的 type descriptor
+    ↓
+torch::jit::Module (ScriptModule)
+    → 通过 pybind11 暴露回 Python (torch/csrc/jit/python/script_init.cpp)
+    → Python 侧为 torch.jit.ScriptModule
+ConcreteModuleType 会遍历 Python Module 的 _parameters、_buffers、_modules，将它们映射为 JIT 类型系统中的 typed attributes（带 isParam_/isBuffer_ 标记），forward hooks 也会被编译进 JIT type。
+
+4. 与 Autograd 的协作
+Module 本身不直接与 C++ autograd 引擎交互。参数（Parameter）是 Tensor 的子类，设置了 requires_grad=True。当 forward() 中进行运算时，C++ autograd 引擎自动构建计算图。Module 层面的 backward hook 通过 BackwardHook（torch/utils/hooks.py）在 grad_fn 上注册回调来实现。
