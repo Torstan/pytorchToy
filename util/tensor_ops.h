@@ -3,6 +3,7 @@
 #include "../tensor.h"
 #include "../ops.h"
 #include "math.h"
+#include "gemm.h"
 #include <vector>
 #include <stdexcept>
 #include <algorithm>
@@ -23,21 +24,12 @@ namespace util {
 // - 高维: 最后两维做矩阵乘，前面的维度做广播
 // ============================================================
 
-// ---- i-k-j 矩阵乘法内核 ----
-// i-k-j 循环序: B 和 C 都按行连续访问，cache 友好
-// -O2 下编译器可对内层 j 循环做 SIMD 向量化
+// ---- 矩阵乘法入口 (委托到 cache-oblivious 递归内核) ----
 static inline void matmul_ikj(
     const float* A, const float* B, float* C,
     int M, int K, int N)
 {
-    for (int i = 0; i < M * N; i++) C[i] = 0.0f;
-    for (int i = 0; i < M; i++) {
-        for (int k = 0; k < K; k++) {
-            float a_ik = A[i * K + k];
-            for (int j = 0; j < N; j++)
-                C[i * N + j] += a_ik * B[k * N + j];
-        }
-    }
+    gemm::matmul(A, B, C, M, K, N);
 }
 
 inline Tensor batched_matmul(const Tensor& a, const Tensor& b) {
