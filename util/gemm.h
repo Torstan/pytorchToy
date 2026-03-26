@@ -1,30 +1,96 @@
 #pragma once
+#include <immintrin.h>
+#include <cstring>
+#include <algorithm>
 
 // ============================================================
-// Cache-Oblivious 矩阵乘法 (REC-MULT)
+// 高性能矩阵乘法内核
 //
-// 参考: Frigo, Leiserson, Prokop, Ramachandran.
-//       "Cache-Oblivious Algorithms." ACM Trans. Algorithms, 2012.
+// 参考:
+//   1. Frigo et al. "Cache-Oblivious Algorithms." 2012
+//   2. MIT 6.172 Lecture 1 (Leiserson) — register tiling + AVX
 //
-// 递归分治策略: 沿最大维度二分，直到子问题适配 cache。
-// 无需知道 cache 参数（cache-oblivious），自动适配 L1/L2/L3。
-//
-// Cache 复杂度: Q(m,n,p) = Θ(m+n+p + (mn+np+mp)/B + mnp/B√M)
-// 与 cache-aware 的 tiled 算法相同，是理论最优。
+// 优化层次:
+//   Level 1: Cache-oblivious 递归 — 自动适配 L1/L2/L3
+//   Level 2: Register tiling — 6×16 micro-tile 保持 C 在 AVX 寄存器
+//   Level 3: AVX2 FMA — vfmadd231ps, 每条指令 8 FLOPs
+//   Level 4: -O3 -march=native -ffast-math -funroll-loops
 // ============================================================
 
 namespace gemm {
 
-// 基础情况阈值 — 子问题所有维度 ≤ THRESHOLD 时用 i-k-j 微内核
-// 论文建议 coarsened base case 以减少递归开销
-// 32~64 是实践中的甜点区间
-static constexpr int THRESHOLD = 64;
+static constexpr int THRESHOLD = 128;
 
-// ---- i-k-j 微内核: C[m×p] += A[m×n] * B[n×p] ----
-// 操作子矩阵，通过 leading dimension (stride) 描述布局，避免数据拷贝
-// i-k-j 循环序: A 按行扫描，B 和 C 内层按行连续访问，cache 友好
-// -O2 下编译器可对内层 j 循环做 SIMD 向量化
-static inline void micro_gemm(
+// ---- 6×16 register-tiled 微内核 ----
+// C[6×16] 保持在 12 个 AVX 寄存器中 (6 行 × 2 __m256)
+// 对每个 k: 广播 A[i][k] → 6 个 __m256, 加载 B[k][j:j+16] → 2 个 __m256
+// 用 FMA 累加: c_ij += a_ik * b_kj
+// 整个 k 循环中 C 不回写内存，减少 load/store 带宽
+static inline void micro_6x16(
+    const float* __restrict__ A, int lda,
+    const float* __restrict__ B, int ldb,
+    float* __restrict__ C, int ldc,
+    int kk)
+{
+    // 12 个 AVX 寄存器保持 C[6][16]
+    __m256 c00 = _mm256_loadu_ps(C + 0*ldc);
+    __m256 c01 = _mm256_loadu_ps(C + 0*ldc + 8);
+    __m256 c10 = _mm256_loadu_ps(C + 1*ldc);
+    __m256 c11 = _mm256_loadu_ps(C + 1*ldc + 8);
+    __m256 c20 = _mm256_loadu_ps(C + 2*ldc);
+    __m256 c21 = _mm256_loadu_ps(C + 2*ldc + 8);
+    __m256 c30 = _mm256_loadu_ps(C + 3*ldc);
+    __m256 c31 = _mm256_loadu_ps(C + 3*ldc + 8);
+    __m256 c40 = _mm256_loadu_ps(C + 4*ldc);
+    __m256 c41 = _mm256_loadu_ps(C + 4*ldc + 8);
+    __m256 c50 = _mm256_loadu_ps(C + 5*ldc);
+    __m256 c51 = _mm256_loadu_ps(C + 5*ldc + 8);
+
+    for (int k = 0; k < kk; k++) {
+        __m256 b0 = _mm256_loadu_ps(B + k*ldb);
+        __m256 b1 = _mm256_loadu_ps(B + k*ldb + 8);
+
+        __m256 a0 = _mm256_set1_ps(A[0*lda + k]);
+        c00 = _mm256_fmadd_ps(a0, b0, c00);
+        c01 = _mm256_fmadd_ps(a0, b1, c01);
+
+        __m256 a1 = _mm256_set1_ps(A[1*lda + k]);
+        c10 = _mm256_fmadd_ps(a1, b0, c10);
+        c11 = _mm256_fmadd_ps(a1, b1, c11);
+
+        __m256 a2 = _mm256_set1_ps(A[2*lda + k]);
+        c20 = _mm256_fmadd_ps(a2, b0, c20);
+        c21 = _mm256_fmadd_ps(a2, b1, c21);
+
+        __m256 a3 = _mm256_set1_ps(A[3*lda + k]);
+        c30 = _mm256_fmadd_ps(a3, b0, c30);
+        c31 = _mm256_fmadd_ps(a3, b1, c31);
+
+        __m256 a4 = _mm256_set1_ps(A[4*lda + k]);
+        c40 = _mm256_fmadd_ps(a4, b0, c40);
+        c41 = _mm256_fmadd_ps(a4, b1, c41);
+
+        __m256 a5 = _mm256_set1_ps(A[5*lda + k]);
+        c50 = _mm256_fmadd_ps(a5, b0, c50);
+        c51 = _mm256_fmadd_ps(a5, b1, c51);
+    }
+
+    _mm256_storeu_ps(C + 0*ldc,     c00);
+    _mm256_storeu_ps(C + 0*ldc + 8, c01);
+    _mm256_storeu_ps(C + 1*ldc,     c10);
+    _mm256_storeu_ps(C + 1*ldc + 8, c11);
+    _mm256_storeu_ps(C + 2*ldc,     c20);
+    _mm256_storeu_ps(C + 2*ldc + 8, c21);
+    _mm256_storeu_ps(C + 3*ldc,     c30);
+    _mm256_storeu_ps(C + 3*ldc + 8, c31);
+    _mm256_storeu_ps(C + 4*ldc,     c40);
+    _mm256_storeu_ps(C + 4*ldc + 8, c41);
+    _mm256_storeu_ps(C + 5*ldc,     c50);
+    _mm256_storeu_ps(C + 5*ldc + 8, c51);
+}
+
+// ---- 通用标量微内核 (处理边界) ----
+static inline void micro_scalar(
     const float* __restrict__ A, int lda,
     const float* __restrict__ B, int ldb,
     float* __restrict__ C, int ldc,
@@ -39,54 +105,66 @@ static inline void micro_gemm(
     }
 }
 
+// ---- 基础情况微内核: 用 6×16 register tile 覆盖 ----
+// 将 m×p 的 C 块分成 6×16 的 tile，尽可能用 SIMD 微内核
+static inline void micro_gemm(
+    const float* __restrict__ A, int lda,
+    const float* __restrict__ B, int ldb,
+    float* __restrict__ C, int ldc,
+    int m, int n, int p)
+{
+    int i = 0;
+    // 6 行一组
+    for (; i + 5 < m; i += 6) {
+        int j = 0;
+        // 16 列一组 → 调用 6×16 register-tiled 微内核
+        for (; j + 15 < p; j += 16) {
+            micro_6x16(A + i*lda, lda, B + j, ldb, C + i*ldc + j, ldc, n);
+        }
+        // 余列: 标量处理
+        if (j < p) {
+            micro_scalar(A + i*lda, lda, B + j, ldb, C + i*ldc + j, ldc, 6, n, p - j);
+        }
+    }
+    // 余行: 标量处理
+    if (i < m) {
+        micro_scalar(A + i*lda, lda, B, ldb, C + i*ldc, ldc, m - i, n, p);
+    }
+}
+
 // ---- Cache-oblivious 递归矩阵乘法: C += A * B ----
-// A: m×n (leading dim = lda)
-// B: n×p (leading dim = ldb)
-// C: m×p (leading dim = ldc)
 static void rec_mult(
     const float* __restrict__ A, int lda,
     const float* __restrict__ B, int ldb,
     float* __restrict__ C, int ldc,
     int m, int n, int p)
 {
-    // 基础情况: 所有维度 ≤ THRESHOLD，用微内核
     if (m <= THRESHOLD && n <= THRESHOLD && p <= THRESHOLD) {
         micro_gemm(A, lda, B, ldb, C, ldc, m, n, p);
         return;
     }
 
-    // 沿最大维度切分
     if (m >= n && m >= p) {
-        // Case 1: m 最大 — 水平切 A 和 C
-        //   C1 += A1 * B
-        //   C2 += A2 * B
         int m2 = m / 2;
         rec_mult(A,            lda, B, ldb, C,            ldc, m2,     n, p);
         rec_mult(A + m2 * lda, lda, B, ldb, C + m2 * ldc, ldc, m - m2, n, p);
     } else if (n >= m && n >= p) {
-        // Case 2: n 最大 — 切 A 的列和 B 的行，两次累加到同一 C
-        //   C += A1 * B1 + A2 * B2
         int n2 = n / 2;
         rec_mult(A,      lda, B,            ldb, C, ldc, m, n2,     p);
         rec_mult(A + n2, lda, B + n2 * ldb, ldb, C, ldc, m, n - n2, p);
     } else {
-        // Case 3: p 最大 — 垂直切 B 和 C
-        //   C1 += A * B1
-        //   C2 += A * B2
         int p2 = p / 2;
         rec_mult(A, lda, B,      ldb, C,      ldc, m, n, p2);
         rec_mult(A, lda, B + p2, ldb, C + p2, ldc, m, n, p - p2);
     }
 }
 
-// ---- 顶层接口: C = A * B (连续布局) ----
-// A: M×K, B: K×N, C: M×N (所有 row-major 连续)
+// ---- 顶层接口: C = A * B ----
 static inline void matmul(
     const float* A, const float* B, float* C,
     int M, int K, int N)
 {
-    // C 清零（rec_mult 是累加模式 C += A*B）
-    for (int i = 0; i < M * N; i++) C[i] = 0.0f;
+    std::memset(C, 0, sizeof(float) * M * N);
     rec_mult(A, K, B, N, C, N, M, K, N);
 }
 
