@@ -1,5 +1,12 @@
 CXX := g++
 CXXFLAGS := -std=c++17 -O3 -march=native -Wall -fPIC -funroll-loops -ffast-math
+LDFLAGS :=
+
+# 用 make OMP=1 开启 OpenMP 并行
+ifdef OMP
+CXXFLAGS += -fopenmp
+LDFLAGS += -fopenmp
+endif
 
 PYBIND11_INCLUDE := $(shell python3 -c "import pybind11; print(pybind11.get_include())")
 PYTHON_INCLUDE := $(shell python3 -c "import sysconfig; print(sysconfig.get_path('include'))")
@@ -11,7 +18,13 @@ NN_TARGET := _nn_C$(EXT_SUFFIX)
 # 生成的文件（由 codegen.py 从 native_functions.yaml 生成）
 GENERATED := generated/tensor_methods.h generated/dispatch.h generated/tensor_bindings.inl generated/module_bindings.inl
 
-.PHONY: all clean run codegen demo_codegen
+# ============================================================
+# test/ 下的 C++ 测试
+# ============================================================
+TEST_SRCS := $(wildcard test/*.cpp)
+TEST_BINS := $(TEST_SRCS:.cpp=)
+
+.PHONY: all clean run codegen demo_codegen test
 
 all: $(TARGET) $(NN_TARGET)
 
@@ -49,7 +62,7 @@ bindings.o: bindings.cpp ops.h tensor.h tensor_base.h tensor_impl.h $(GENERATED)
 
 $(TARGET): tensor_base.o bindings.o
 	@echo ">>> 链接 $(TARGET)"
-	$(CXX) -shared tensor_base.o bindings.o -o $@
+	$(CXX) -shared $(LDFLAGS) tensor_base.o bindings.o -o $@
 
 # ============================================================
 # nn 模块编译
@@ -62,7 +75,7 @@ nn_bindings.o: nn/nn_bindings.cpp $(NN_HEADERS) ops.h tensor.h tensor_base.h ten
 
 $(NN_TARGET): nn_bindings.o
 	@echo ">>> 链接 $(NN_TARGET)"
-	$(CXX) -shared nn_bindings.o -o $@
+	$(CXX) -shared $(LDFLAGS) nn_bindings.o -o $@
 
 run: $(TARGET) $(NN_TARGET)
 	python3 demo.py
@@ -99,7 +112,17 @@ demo_codegen:
 	@echo "结论: 修改算子只重编译 bindings.o，tensor_base.o 不受影响"
 	@echo "=============================="
 
+# ============================================================
+# test/ 下的 C++ 可执行文件: make test/test_gemm
+# ============================================================
+test/%: test/%.cpp
+	@echo ">>> 编译 $@"
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -I. $< -o $@
+
+test: $(TEST_BINS)
+	@for t in $(TEST_BINS); do echo ">>> 运行 $$t"; ./$$t || exit 1; done
+
 clean:
-	rm -f $(TARGET) *.o *.so
+	rm -f $(TARGET) *.o *.so $(TEST_BINS)
 	rm -rf generated/
 	rm -rf build *.egg-info
