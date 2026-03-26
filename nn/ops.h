@@ -64,8 +64,9 @@ inline std::tuple<Tensor, Tensor, Tensor> linear_backward(
         {batch_total, out_features});
 
     // grad_weight = go_2d^T @ input_2d  [out, batch] @ [batch, in]
+    // 使用 batched_matmul (i-k-j 内核) 而非 native::matmul (i-j-k + stride)
     Tensor go_2d_t = native::transpose(go_2d, 0, 1);
-    Tensor grad_weight = native::matmul(go_2d_t, input_2d);
+    Tensor grad_weight = util::batched_matmul(go_2d_t, input_2d);
 
     // grad_bias = sum over batch dims
     Tensor grad_bias = native::empty({out_features});
@@ -698,9 +699,9 @@ inline MHAResult multihead_attention_forward(
     Wk_t = Wk_t.is_contiguous() ? Wk_t : native::contiguous(Wk_t);
     Wv_t = Wv_t.is_contiguous() ? Wv_t : native::contiguous(Wv_t);
 
-    Tensor Q_proj = native::matmul(q_flat, Wq_t);
-    Tensor K_proj = native::matmul(k_flat, Wk_t);
-    Tensor V_proj = native::matmul(v_flat, Wv_t);
+    Tensor Q_proj = util::batched_matmul(q_flat, Wq_t);
+    Tensor K_proj = util::batched_matmul(k_flat, Wk_t);
+    Tensor V_proj = util::batched_matmul(v_flat, Wv_t);
 
     if (has_bias) {
         Q_proj = util::broadcast_add(Q_proj, b_q);
@@ -754,7 +755,7 @@ inline MHAResult multihead_attention_forward(
     Tensor merged_flat = native::reshape(merged, {seq_q * batch, d_model});
     Tensor Wout_t = native::transpose(W_out, 0, 1);
     Wout_t = Wout_t.is_contiguous() ? Wout_t : native::contiguous(Wout_t);
-    Tensor output = native::matmul(merged_flat, Wout_t);
+    Tensor output = util::batched_matmul(merged_flat, Wout_t);
     if (has_bias) {
         output = util::broadcast_add(output, b_out);
     }
