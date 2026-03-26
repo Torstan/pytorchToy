@@ -253,12 +253,10 @@ public:
         const Tensor& grad = grad_outputs[0];
         // grad_a = grad @ b^T
         Tensor bt = native::transpose(saved_b, 0, 1);
-        bt = bt.is_contiguous() ? bt : native::contiguous(bt);
-        Tensor ga = native::matmul(grad, bt);
+        Tensor ga = util::batched_matmul(grad, bt);
         // grad_b = a^T @ grad
         Tensor at = native::transpose(saved_a, 0, 1);
-        at = at.is_contiguous() ? at : native::contiguous(at);
-        Tensor gb = native::matmul(at, grad);
+        Tensor gb = util::batched_matmul(at, grad);
         return {ga, gb};
     }
 };

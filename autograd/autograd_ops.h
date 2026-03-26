@@ -152,7 +152,7 @@ inline Tensor neg(const Tensor& a) {
 // ============================================================
 
 inline Tensor mm(const Tensor& a, const Tensor& b) {
-    Tensor result = native::matmul(a, b);
+    Tensor result = util::batched_matmul(a, b);
     if (needs_grad(a, b)) {
         auto fn = std::make_shared<MmBackward>(Tensor(a), Tensor(b));
         connect_input(fn.get(), a);

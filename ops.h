@@ -175,27 +175,27 @@ inline Tensor mul(const Tensor& a, const Tensor& b) {
     return result;
 }
 
-// at::matmul — 矩阵乘法 (2D)，stride 感知
+// at::matmul — 矩阵乘法 (2D)，i-k-j 循环序 (cache 友好)
 inline Tensor matmul(const Tensor& a, const Tensor& b) {
     if (a.dim() != 2 || b.dim() != 2)
         throw std::runtime_error("matmul requires 2D tensors");
     int M = a.sizes()[0], K = a.sizes()[1], N = b.sizes()[1];
     if (K != b.sizes()[0])
         throw std::runtime_error("matmul shape mismatch");
+    // 确保连续以获得最佳 cache 性能
+    Tensor ca = a.is_contiguous() ? Tensor(a) : contiguous(a);
+    Tensor cb = b.is_contiguous() ? Tensor(b) : contiguous(b);
     Tensor result = empty({M, N});
-    const float* sa = a.storage()->data.data();
-    const float* sb = b.storage()->data.data();
+    const float* pa = ca.data_ptr();
+    const float* pb = cb.data_ptr();
     float* pr = result.data_ptr();
-    int a_off = a.storage_offset(), b_off = b.storage_offset();
-    int a_s0 = a.strides()[0], a_s1 = a.strides()[1];
-    int b_s0 = b.strides()[0], b_s1 = b.strides()[1];
+    // i-k-j: B 和 C 按行连续访问，-O2 下内层 j 循环可 SIMD 向量化
+    for (int i = 0; i < M * N; i++) pr[i] = 0.0f;
     for (int i = 0; i < M; i++)
-        for (int j = 0; j < N; j++) {
-            float s = 0;
-            for (int k = 0; k < K; k++)
-                s += sa[a_off + i * a_s0 + k * a_s1]
-                   * sb[b_off + k * b_s0 + j * b_s1];
-            pr[i * N + j] = s;
+        for (int k = 0; k < K; k++) {
+            float a_ik = pa[i * K + k];
+            for (int j = 0; j < N; j++)
+                pr[i * N + j] += a_ik * pb[k * N + j];
         }
     return result;
 }
