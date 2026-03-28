@@ -464,13 +464,40 @@ inline RnnResult rnn(const Tensor& input, const Tensor& hidden, bool has_hidden,
                                     weight_ih, weight_hh, bias_ih, bias_hh,
                                     batch_first);
 
-    // 需要重新收集 h_states 用于 backward (forward 不暴露它们)
-    // 简化: 不在 C++ autograd 中实现 RNN backward
-    // RNN backward 通过 Python autograd 仍然工作
-    // 这里只返回结果，不连接 autograd 图
-    // TODO: 完整实现
+    Tensor output = result.output;
+    Tensor h_n = result.h_n;
 
-    return {result.output, result.h_n};
+    bool needs_grad_input = needs_grad(input);
+    bool needs_grad_hidden = has_hidden && needs_grad(hidden);
+    bool needs_grad_wih = needs_grad(weight_ih);
+    bool needs_grad_whh = needs_grad(weight_hh);
+    bool needs_grad_bih = needs_grad(bias_ih);
+    bool needs_grad_bhh = needs_grad(bias_hh);
+
+    bool any_needs_grad = needs_grad_input || needs_grad_hidden ||
+                          needs_grad_wih || needs_grad_whh ||
+                          needs_grad_bih || needs_grad_bhh;
+
+    if (any_needs_grad) {
+        auto fn = std::make_shared<RnnBackward>(
+            Tensor(input), Tensor(hidden), has_hidden,
+            Tensor(weight_ih), Tensor(weight_hh),
+            Tensor(bias_ih), Tensor(bias_hh),
+            std::move(result.saved_h_states), batch_first,
+            needs_grad_input, needs_grad_hidden);
+
+        // connect_input 顺序必须与 RnnBackward::apply 返回顺序一致
+        if (needs_grad_input) connect_input(fn.get(), input);
+        if (needs_grad_hidden) connect_input(fn.get(), hidden);
+        connect_input(fn.get(), weight_ih);
+        connect_input(fn.get(), weight_hh);
+        connect_input(fn.get(), bias_ih);
+        connect_input(fn.get(), bias_hh);
+
+        set_output(output, fn, 0);
+    }
+
+    return {output, h_n};
 }
 
 // ============================================================

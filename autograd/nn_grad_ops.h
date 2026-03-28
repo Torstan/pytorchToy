@@ -230,20 +230,23 @@ public:
     Tensor saved_bias_ih, saved_bias_hh;
     std::vector<Tensor> saved_h_states;
     bool batch_first;
+    bool needs_grad_input, needs_grad_hidden;
 
     RnnBackward(Tensor input, Tensor hidden, bool hh,
                 Tensor wih, Tensor whh, Tensor bih, Tensor bhh,
-                std::vector<Tensor> h_states, bool bf)
+                std::vector<Tensor> h_states, bool bf,
+                bool ng_input, bool ng_hidden)
         : saved_input(std::move(input)), saved_hidden(std::move(hidden)),
           has_hidden(hh),
           saved_weight_ih(std::move(wih)), saved_weight_hh(std::move(whh)),
           saved_bias_ih(std::move(bih)), saved_bias_hh(std::move(bhh)),
-          saved_h_states(std::move(h_states)), batch_first(bf) {
-        num_inputs = 4; // weight_ih, weight_hh, bias_ih, bias_hh
+          saved_h_states(std::move(h_states)), batch_first(bf),
+          needs_grad_input(ng_input), needs_grad_hidden(ng_hidden) {
+        // num_inputs 需与 connect_input 调用次数一致
+        num_inputs = (ng_input ? 1 : 0) + (ng_hidden ? 1 : 0) + 4;
     }
 
     std::vector<Tensor> apply(const std::vector<Tensor>& grad_outputs) override {
-        // grad_outputs[0] = grad_output, grad_outputs[1] = grad_h_n (may not exist)
         Tensor grad_h_n = native::empty({1});
         bool has_grad_h_n = false;
 
@@ -254,7 +257,14 @@ public:
             saved_bias_ih, saved_bias_hh,
             saved_h_states, batch_first);
 
-        return {result.grad_weight_ih, result.grad_weight_hh,
-                result.grad_bias_ih, result.grad_bias_hh};
+        // 返回顺序必须与 connect_input 调用顺序一致
+        std::vector<Tensor> grads;
+        if (needs_grad_input) grads.push_back(result.grad_input);
+        if (needs_grad_hidden) grads.push_back(result.grad_hidden);
+        grads.push_back(result.grad_weight_ih);
+        grads.push_back(result.grad_weight_hh);
+        grads.push_back(result.grad_bias_ih);
+        grads.push_back(result.grad_bias_hh);
+        return grads;
     }
 };
