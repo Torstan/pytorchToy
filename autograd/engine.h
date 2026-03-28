@@ -8,6 +8,7 @@
 #include <unordered_set>
 #include <queue>
 #include <stdexcept>
+#include <cstring>
 
 // ============================================================
 // Engine — 反向传播引擎
@@ -135,11 +136,22 @@ private:
         Tensor merged = native::empty(std::vector<int>(grads[0].sizes()));
         float* pm = merged.data_ptr();
         int n = merged.numel();
-        for (int i = 0; i < n; i++) pm[i] = 0.0f;
-        for (const auto& g : grads) {
-            auto* impl = g.unsafeGetTensorImpl();
-            for (int i = 0; i < n; i++) {
-                pm[i] += impl->read_logical(i);
+        // 用第一个梯度直接初始化，省去零初始化的额外遍历
+        auto* first = grads[0].unsafeGetTensorImpl();
+        if (first->is_contiguous()) {
+            const float* src = first->data_ptr();
+            std::memcpy(pm, src, n * sizeof(float));
+        } else {
+            for (int i = 0; i < n; i++) pm[i] = first->read_logical(i);
+        }
+        // 累加剩余梯度，连续张量走快速路径
+        for (size_t gi = 1; gi < grads.size(); gi++) {
+            auto* impl = grads[gi].unsafeGetTensorImpl();
+            if (impl->is_contiguous()) {
+                const float* src = impl->data_ptr();
+                for (int i = 0; i < n; i++) pm[i] += src[i];
+            } else {
+                for (int i = 0; i < n; i++) pm[i] += impl->read_logical(i);
             }
         }
         return {merged};

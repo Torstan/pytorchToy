@@ -104,6 +104,7 @@ inline std::tuple<Tensor, Tensor, Tensor> linear_backward(
 struct RNNResult {
     Tensor output;
     Tensor h_n;
+    std::vector<Tensor> saved_h_states; // h_states[0]=h_{-1}, h_states[t+1]=h_t
 };
 
 inline RNNResult rnn_forward(const Tensor& input, const Tensor& hidden,
@@ -136,6 +137,11 @@ inline RNNResult rnn_forward(const Tensor& input, const Tensor& hidden,
     } else {
         h = native::empty({batch, hidden_size});
     }
+
+    // 保存中间 hidden states 用于 backward
+    // h_states[0] = h_{-1} (初始隐状态), h_states[t+1] = h_t
+    std::vector<Tensor> h_states;
+    h_states.push_back(util::clone(h));
 
     // 确保输入连续
     Tensor ci = input.is_contiguous() ? Tensor(input) : native::contiguous(input);
@@ -189,6 +195,7 @@ inline RNNResult rnn_forward(const Tensor& input, const Tensor& hidden,
         }
 
         h = h_new;
+        h_states.push_back(util::clone(h));
 
         // 存储输出: output[t, b, :] = h[b, :]
         for (int b = 0; b < batch; b++) {
@@ -217,7 +224,7 @@ inline RNNResult rnn_forward(const Tensor& input, const Tensor& hidden,
     // h_n: [1, batch, hidden_size]
     Tensor h_n = native::reshape(util::clone(h), {1, batch, hidden_size});
 
-    return {final_output, h_n};
+    return {final_output, h_n, std::move(h_states)};
 }
 
 // RNN backward
