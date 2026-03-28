@@ -4,9 +4,13 @@ Autograd Engine — C++ 主引擎 + Python 兼容层
 
 import sys
 import os
+import weakref
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import _C
 import _nn_C
+
+
+_python_grad_tensors = []
 
 
 class no_grad:
@@ -52,9 +56,28 @@ def record(outputs, inputs, backward_fn, name=""):
     for out in outputs:
         out._grad_fn = grad_fn
         out.requires_grad = True
+        _python_grad_tensors.append(weakref.ref(out))
+
+def iter_mixed_roots():
+    """返回已收到 C++ 梯度、需要继续走 Python backward 的根张量。"""
+    roots = []
+    alive = []
+    for ref in _python_grad_tensors:
+        t = ref()
+        if t is None:
+            continue
+        alive.append(ref)
+        if t.__dict__.get('_py_grad_fn') is None:
+            continue
+        grad = t.grad
+        if grad is None:
+            continue
+        roots.append((t, grad))
+    _python_grad_tensors[:] = alive
+    return roots
 
 
-def backward(loss_tensor):
+def backward(loss_tensor, grad_output=None):
     """
     Python backward — 遍历 Python _grad_fn 图。
     用于 RNN 等仍使用 record() 的模块。
@@ -78,7 +101,7 @@ def backward(loss_tensor):
     _topo_sort(loss_tensor)
 
     grad_map = {}
-    grad_map[id(loss_tensor)] = _ones_like(loss_tensor)
+    grad_map[id(loss_tensor)] = grad_output if grad_output is not None else _ones_like(loss_tensor)
 
     for t in reversed(order):
         gf = t.__dict__.get('_py_grad_fn')
@@ -107,32 +130,8 @@ def backward(loss_tensor):
         if getattr(t, 'requires_grad', False) and id(t) in grad_map:
             if t.__dict__.get('_py_grad_fn') is None:
                 g = grad_map[id(t)]
-                # 累加到 C++ TensorImpl 的 grad
-                gc = g._c if g._c.is_contiguous() else g._c.contiguous()
                 t._c.set_requires_grad(True)
-                # 用 Python 手动累加
-                sizes = list(gc.sizes())
-                n = gc.numel()
-                flat_data = [gc.flat_get(i) for i in range(n)]
-                # 调用 C++ accumulate_grad 的替代方案
-                if not t._c.has_grad():
-                    # 首次: 创建零张量
-                    pass  # accumulate_grad 内部处理
-                # 直接用 C++ flat_set 实现
-                if not t._c.has_grad():
-                    # 初始化 grad
-                    zero = _C.empty(sizes)
-                    for i in range(n):
-                        zero.flat_set(i, flat_data[i])
-                    # 不能直接设置 grad storage，用 workaround
-                    # 先用 Python 级别的 grad 属性
-                    t.__dict__['_py_grad'] = g
-                else:
-                    old_g = t.__dict__.get('_py_grad')
-                    if old_g is not None:
-                        t.__dict__['_py_grad'] = _add_tensors(old_g, g)
-                    else:
-                        t.__dict__['_py_grad'] = g
+                t._c.accumulate_grad(g._c)
 
 
 # ---- 辅助函数 ----

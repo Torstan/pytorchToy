@@ -116,7 +116,10 @@ PYBIND11_MODULE(_C, m) {
                                        std::move(new_sizes), std::move(new_strides));
             return Tensor(TensorImplPtr(vi));
         })
-        .def("__setitem__", [](Tensor& t, int i, float v) { t.data_ptr()[i] = v; })
+        .def("__setitem__", [](Tensor& t, int i, float v) {
+            t.data_ptr()[i] = v;
+            t.unsafeGetTensorImpl()->bump_version();
+        })
         // item() — 从 0-dim 标量 tensor 取出 float 值，类似 PyTorch
         .def("item", [](const Tensor& t) {
             if (t.dim() != 0)
@@ -151,6 +154,7 @@ PYBIND11_MODULE(_C, m) {
                 }
                 impl->storage_->data[offset] = v;
             }
+            impl->bump_version();
         })
         // 算子方法 + 运算符重载（由 codegen.py 从 native_functions.yaml 自动生成）
 #include "generated/tensor_bindings.inl"
@@ -189,6 +193,15 @@ PYBIND11_MODULE(_C, m) {
             return py::cast(Tensor(TensorImplPtr(gi)));
         })
         .def("zero_grad", &Tensor::zero_grad)
+        .def("accumulate_grad", [](Tensor& t, Tensor grad) {
+            Tensor grad_contig = grad;
+            if (!grad_contig.is_contiguous()) {
+                grad_contig = native::contiguous(grad_contig);
+            }
+            auto* impl = t.unsafeGetTensorImpl();
+            auto* gimpl = grad_contig.unsafeGetTensorImpl();
+            impl->accumulate_grad(gimpl->data_ptr(), gimpl->numel(), gimpl->sizes_);
+        })
         .def("get_creator", [](const Tensor& t) -> py::object {
             auto c = t.get_creator();
             if (!c) return py::none();
@@ -321,11 +334,17 @@ PYBIND11_MODULE(_C, m) {
     m.def("autograd_sum_dim", &autograd::sum_dim,
           py::arg("input"), py::arg("dim"), py::arg("keepdim") = false);
     m.def("autograd_linear", [](const Tensor& input, const Tensor& weight,
-                                  py::object bias_obj) {
+                                  py::object bias_obj,
+                                  py::object packed_weight_obj) {
         bool has_bias = !bias_obj.is_none();
         Tensor bias = has_bias ? py::cast<Tensor>(bias_obj) : native::empty({1});
+        if (!packed_weight_obj.is_none()) {
+            Tensor packed_weight = py::cast<Tensor>(packed_weight_obj);
+            return autograd::linear_packed(input, weight, packed_weight, bias, has_bias);
+        }
         return autograd::linear(input, weight, bias, has_bias);
-    }, py::arg("input"), py::arg("weight"), py::arg("bias") = py::none());
+    }, py::arg("input"), py::arg("weight"), py::arg("bias") = py::none(),
+       py::arg("packed_weight") = py::none());
     m.def("autograd_softmax", &autograd::softmax,
           py::arg("input"), py::arg("dim"));
     m.def("autograd_log_softmax", &autograd::log_softmax,

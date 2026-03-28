@@ -147,10 +147,16 @@ class Tensor:
         C++ backward 完成后，检查有 Python _grad_fn 的张量是否收到了 C++ grad。
         如果是，从那些张量继续 Python backward。
         """
-        # 这是一个全局扫描 — 遍历所有 Python GradFn 节点
-        # 在大型模型中不高效，但对当前 RNN 用例足够
-        # TODO: 更高效的实现
-        pass  # RNN 暂不支持混合模式，后续可添加
+        from torch.autograd_engine import backward as py_backward
+        from torch.autograd_engine import iter_mixed_roots
+
+        seen = set()
+        for root, grad in iter_mixed_roots():
+            root_id = id(root)
+            if root_id in seen:
+                continue
+            seen.add(root_id)
+            py_backward(root, grad_output=grad)
 
     def zero_grad(self):
         self._c.zero_grad()

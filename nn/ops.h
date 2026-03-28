@@ -25,17 +25,22 @@ namespace nn {
 // output: [..., out_features]
 // ============================================================
 
-inline Tensor linear_forward(const Tensor& input, const Tensor& weight,
-                              const Tensor& bias, bool has_bias) {
-    // weight^T: [in_features, out_features]
-    Tensor wt = util::transpose_last2(weight);
-    // x @ W^T
-    Tensor output = util::batched_matmul(input, wt);
+inline Tensor linear_forward_packed(const Tensor& input, const Tensor& weight_t,
+                                     const Tensor& bias, bool has_bias) {
+    // x @ W^T, where weight_t is cached as [in_features, out_features]
+    Tensor output = util::batched_matmul(input, weight_t);
     // + bias (广播)
     if (has_bias) {
         output = util::broadcast_add(output, bias);
     }
     return output;
+}
+
+inline Tensor linear_forward(const Tensor& input, const Tensor& weight,
+                              const Tensor& bias, bool has_bias) {
+    // weight^T: [in_features, out_features]
+    Tensor wt = util::transpose_last2(weight);
+    return linear_forward_packed(input, wt, bias, has_bias);
 }
 
 // grad_output: [..., out_features]
@@ -857,6 +862,7 @@ inline bool adam_step(Tensor& param, Tensor& m, Tensor& v,
         float v_hat = vi / bc2;
         p_data[i] -= lr * m_hat / (std::sqrt(v_hat) + eps);
     }
+    impl->bump_version();
     return true;
 }
 
