@@ -290,6 +290,21 @@ inline Tensor linear(const Tensor& input, const Tensor& weight, const Tensor& bi
     return result;
 }
 
+inline Tensor linear_packed(const Tensor& input, const Tensor& weight,
+                            const Tensor& packed_weight_t,
+                            const Tensor& bias, bool has_bias) {
+    Tensor result = nn::linear_forward_packed(input, packed_weight_t, bias, has_bias);
+    bool ng = needs_grad(input, weight) || (has_bias && needs_grad(bias));
+    if (ng) {
+        auto fn = std::make_shared<LinearBackward>(Tensor(input), Tensor(weight), has_bias);
+        connect_input(fn.get(), input);
+        connect_input(fn.get(), weight);
+        if (has_bias) connect_input(fn.get(), bias);
+        set_output(result, fn);
+    }
+    return result;
+}
+
 inline Tensor softmax(const Tensor& input, int dim) {
     Tensor result = util::softmax(input, dim);
     if (needs_grad(input)) {

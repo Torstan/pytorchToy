@@ -22,6 +22,8 @@ class Linear(Module):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
+        self._weight_t_cache = None
+        self._weight_t_cache_key = None
 
         # 参数初始化 (Kaiming uniform)
         k = 1.0 / math.sqrt(in_features)
@@ -36,9 +38,20 @@ class Linear(Module):
         else:
             self.bias = None
 
+    def _get_packed_weight(self):
+        cache_key = (self.weight.data_ptr(), self.weight._version)
+        if self._weight_t_cache is None or self._weight_t_cache_key != cache_key:
+            packed = _nn_C.transpose_last2(self.weight._c)
+            if not packed.is_contiguous():
+                packed = packed.contiguous()
+            self._weight_t_cache = Tensor(packed)
+            self._weight_t_cache_key = cache_key
+        return self._weight_t_cache
+
     def forward(self, input):
         import torch.nn.functional as F
-        return F.linear(input, self.weight, self.bias)
+        return F.linear(input, self.weight, self.bias,
+                        packed_weight=self._get_packed_weight())
 
     def __repr__(self):
         return (f"Linear(in_features={self.in_features}, "

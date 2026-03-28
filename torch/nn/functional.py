@@ -11,9 +11,10 @@ import _C
 from torch.tensor import Tensor
 
 
-def linear(input, weight, bias=None):
+def linear(input, weight, bias=None, packed_weight=None):
     return Tensor(_C.autograd_linear(input._c, weight._c,
-                  bias._c if bias is not None else None))
+                  bias._c if bias is not None else None,
+                  packed_weight._c if packed_weight is not None else None))
 
 
 def softmax(input, dim=-1):

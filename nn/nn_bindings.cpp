@@ -54,10 +54,14 @@ PYBIND11_MODULE(_nn_C, m) {
     // 随机数
     m.def("randint", &util::randint, py::arg("low"), py::arg("high"),
           py::arg("shape"), py::arg("seed") = 0);
-    m.def("fill_randn", [](Tensor& t, unsigned seed) { util::fill_randn(t, seed); },
+    m.def("fill_randn", [](Tensor& t, unsigned seed) {
+        util::fill_randn(t, seed);
+        t.unsafeGetTensorImpl()->bump_version();
+    },
           py::arg("tensor"), py::arg("seed") = 0);
     m.def("fill_uniform", [](Tensor& t, float low, float high, unsigned seed) {
         util::fill_uniform(t, low, high, seed);
+        t.unsafeGetTensorImpl()->bump_version();
     }, py::arg("tensor"), py::arg("low"), py::arg("high"), py::arg("seed") = 0);
 
     // ============================================================
