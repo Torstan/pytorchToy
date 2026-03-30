@@ -9,12 +9,51 @@ torch.compile API -- pytorchToy 的编译入口
 
 核心流程:
   torch.compile(fn) -> OptimizedFunction
-    -> 首次调用时: Tracer.trace(fn) -> GraphModule -> backend(gm) -> compiled_fn
-    -> 后续调用: 直接使用 compiled_fn (缓存复用)
+    -> 每次调用时: 检查 guard cache
+      -> cache hit: 直接使用 compiled_fn
+      -> cache miss: Tracer.trace(fn) -> GraphModule -> backend(gm) -> compiled_fn
 """
 
-from torch._compile.tracer import Tracer
+import inspect
+from functools import wraps
+
+from torch._compile.tracer import Tracer, UnsupportedTraceError
 from torch._compile.backend import lookup_backend
+
+
+def _value_signature(value):
+    """
+    提取值的编译签名 (shape, dtype, requires_grad 等)
+
+    对应 PyTorch Guard 系统的简化版:
+    PyTorch 用 Guard 检查输入是否满足已编译图的前提条件,
+    这里简化为基于签名的 hash key。
+    """
+    from torch.tensor import Tensor
+    if isinstance(value, Tensor):
+        dtype = getattr(getattr(value, "_dtype", None), "name",
+                        repr(getattr(value, "_dtype", None)))
+        return ("tensor", tuple(value.shape), dtype, value.requires_grad)
+    if isinstance(value, (int, float, str, bool, type(None))):
+        return (type(value).__name__, value)
+    if isinstance(value, tuple):
+        return ("tuple", tuple(_value_signature(item) for item in value))
+    if isinstance(value, list):
+        return ("list", tuple(_value_signature(item) for item in value))
+    if isinstance(value, dict):
+        items = tuple((key, _value_signature(item))
+                      for key, item in sorted(value.items()))
+        return ("dict", items)
+    return (type(value).__name__, id(value))
+
+
+def _call_signature(args, kwargs):
+    """计算一次调用的完整签名，作为 cache key"""
+    return (
+        tuple(_value_signature(arg) for arg in args),
+        tuple((key, _value_signature(value))
+              for key, value in sorted(kwargs.items())),
+    )
 
 
 class OptimizedFunction:
@@ -22,7 +61,11 @@ class OptimizedFunction:
     torch.compile 返回的包装对象
 
     对应 PyTorch 的 OptimizedModule / _TorchDynamoContext.__call__ 返回值。
-    延迟到首次调用时进行 tracing 和编译，之后缓存编译结果。
+
+    带 Guard + Cache 机制:
+    - 每次调用时提取输入签名 (shape, dtype, requires_grad)
+    - 签名命中缓存时直接复用已编译结果
+    - 签名变化时重新 trace + compile (recompilation)
     """
 
     def __init__(self, fn, backend="default", fullgraph=False, dynamic=None):
@@ -31,29 +74,37 @@ class OptimizedFunction:
         self._backend = lookup_backend(backend)
         self._fullgraph = fullgraph
         self._dynamic = dynamic
-        self._compiled_fn = None
-        self._graph_module = None
+        self._cache = {}
 
     def __call__(self, *args, **kwargs):
-        if self._compiled_fn is None:
-            # 首次调用: trace + compile
-            self._graph_module = self._trace(args)
-            self._log_graph()
-            self._compiled_fn = self._backend(self._graph_module, list(args))
-        return self._compiled_fn(*args, **kwargs)
+        key = _call_signature(args, kwargs)
+        compiled = self._cache.get(key)
+        if compiled is None:
+            compiled = self._compile_for_signature(*args, **kwargs)
+            self._cache[key] = compiled
+        return compiled(*args, **kwargs)
 
-    def _trace(self, example_inputs):
-        """执行 tracing，构建 GraphModule"""
+    def _compile_for_signature(self, *args, **kwargs):
+        """对当前输入签名执行 trace + compile"""
         tracer = Tracer()
-        return tracer.trace(self._original_fn, example_inputs)
+        try:
+            graph_module = tracer.trace(self._original_fn, args)
+        except UnsupportedTraceError:
+            if self._fullgraph:
+                raise
+            # fullgraph=False 时，graph break 后 fallback 到 eager
+            return self._original_fn
 
-    def _log_graph(self):
+        self._log_graph(graph_module)
+        return self._backend(graph_module, list(args))
+
+    def _log_graph(self, graph_module):
         """如果启用了 graph_code 日志，打印 Graph"""
         from torch._logging import get_log_settings
         settings = get_log_settings()
         if settings.get('graph_code', False):
             print("=== GRAPH CODE ===")
-            self._graph_module.print_readable()
+            graph_module.print_readable()
             print("==================")
 
 
@@ -71,7 +122,7 @@ def compile(model=None, *, fullgraph=False, dynamic=None, backend="default",
 
     Args:
         model: 要编译的函数或 Module (None 时返回装饰器)
-        fullgraph: 是否要求整个函数为单一图 (简化实现中未强制)
+        fullgraph: 是否要求整个函数为单一图
         dynamic: 动态形状 (简化实现中未使用)
         backend: 后端名称或 callable
         mode: 编译模式 (简化实现中未使用)
@@ -83,12 +134,12 @@ def compile(model=None, *, fullgraph=False, dynamic=None, backend="default",
             return model
         return lambda fn: fn
 
-    # @torch.compile (无括号装饰器 — model 就是被装饰的函数)
+    # @torch.compile (无括号装饰器 -- model 就是被装饰的函数)
     if model is not None and callable(model):
         return OptimizedFunction(model, backend=backend, fullgraph=fullgraph,
                                  dynamic=dynamic)
 
-    # @torch.compile(...) (带参数装饰器 — 返回装饰器工厂)
+    # @torch.compile(...) (带参数装饰器 -- 返回装饰器工厂)
     def decorator(fn):
         return OptimizedFunction(fn, backend=backend, fullgraph=fullgraph,
                                  dynamic=dynamic)

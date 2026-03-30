@@ -7,23 +7,56 @@ Proxy-based Tracer -- 通过代理对象拦截操作，构建 FX Graph
 工作原理:
 1. 为每个函数输入创建 Proxy 对象
 2. Proxy 重载所有运算符，每次操作记录到 Graph 中
-3. torch.sin 等函数检查参数是否为 Proxy，如果是则走 tracing 路径
+3. torch.sin 等函数通过 duck typing 调用 Proxy.sin()，自动走 tracing 路径
 4. 最终收集输出，构建完整的 GraphModule
 """
 
+import threading
+
 from torch._compile.graph import Graph, GraphModule, Node
 
-# 全局 tracing 状态
-_current_tracer = None
+
+class UnsupportedTraceError(RuntimeError):
+    """
+    tracing 遇到不支持的操作时抛出
+
+    对应 PyTorch torch._dynamo.exc.Unsupported。
+    在 fullgraph=False 时会被捕获并 fallback 到 eager；
+    在 fullgraph=True 时会传播给用户。
+    """
+    pass
+
+
+# ---- Tracing 状态管理 (线程安全) ----
+
+_TRACE_STATE = threading.local()
+
+
+def current_tracer():
+    """获取当前线程的 tracer"""
+    return getattr(_TRACE_STATE, "tracer", None)
 
 
 def is_tracing():
     """当前是否处于 tracing 模式"""
-    return _current_tracer is not None
+    return current_tracer() is not None
 
 
-def get_current_tracer():
-    return _current_tracer
+class _TraceContext:
+    """tracing 上下文管理器，进入/退出 tracing 模式"""
+
+    def __init__(self, tracer):
+        self.tracer = tracer
+        self.previous = None
+
+    def __enter__(self):
+        self.previous = current_tracer()
+        _TRACE_STATE.tracer = self.tracer
+        return self.tracer
+
+    def __exit__(self, exc_type, exc, tb):
+        _TRACE_STATE.tracer = self.previous
+        return False
 
 
 class Proxy:
@@ -32,6 +65,9 @@ class Proxy:
 
     包装一个 Graph Node，拦截所有操作并记录到 Graph。
     当对 Proxy 做运算时，产生新的 Proxy (新的 Node)。
+
+    显式列举支持的方法 (sin, cos 等)，
+    同时通过 __getattr__ 泛化处理其他方法调用。
     """
 
     def __init__(self, node, tracer):
@@ -49,86 +85,75 @@ class Proxy:
     def __repr__(self):
         return f"Proxy({self.node})"
 
+    # ---- 显式方法 (确保 duck typing 的 hasattr 检查通过) ----
+
+    def sin(self):
+        return self.tracer.create_proxy("sin", (self,))
+
+    def cos(self):
+        return self.tracer.create_proxy("cos", (self,))
+
+    def relu(self):
+        return self.tracer.create_proxy("relu", (self,))
+
+    def tanh(self):
+        return self.tracer.create_proxy("tanh", (self,))
+
+    def sum(self, dim=None, keepdim=False):
+        return self.tracer.create_proxy("sum", (self,),
+                                        {"dim": dim, "keepdim": keepdim})
+
     # ---- 算术运算符 ----
 
     def __add__(self, other):
-        return self._binary_op('__add__', other)
+        return self.tracer.create_proxy("add", (self, other))
 
     def __radd__(self, other):
-        return self._binary_op('__radd__', other)
+        return self.tracer.create_proxy("add", (other, self))
 
     def __sub__(self, other):
-        return self._binary_op('__sub__', other)
+        return self.tracer.create_proxy("sub", (self, other))
 
     def __rsub__(self, other):
-        return self._binary_op('__rsub__', other)
+        return self.tracer.create_proxy("sub", (other, self))
 
     def __mul__(self, other):
-        return self._binary_op('__mul__', other)
+        return self.tracer.create_proxy("mul", (self, other))
 
     def __rmul__(self, other):
-        return self._binary_op('__rmul__', other)
+        return self.tracer.create_proxy("mul", (other, self))
 
     def __truediv__(self, other):
-        return self._binary_op('__truediv__', other)
+        return self.tracer.create_proxy("div", (self, other))
 
     def __neg__(self):
-        return self._method_call('__neg__')
+        return self.tracer.create_proxy("neg", (self,))
 
-    # ---- 方法调用 ----
+    # ---- Graph Break 触发器 (data-dependent 操作不可 trace) ----
+
+    def __bool__(self):
+        raise UnsupportedTraceError(
+            "data-dependent control flow is not supported: "
+            "cannot convert Proxy to bool during tracing"
+        )
+
+    def __len__(self):
+        raise UnsupportedTraceError(
+            "len() on Proxy is not supported during tracing"
+        )
+
+    def item(self):
+        raise UnsupportedTraceError(
+            "item() on Proxy is not supported during tracing: "
+            "data-dependent value access"
+        )
+
+    # ---- 泛化方法拦截 (fallback) ----
 
     def __getattr__(self, name):
-        # 允许在 Proxy 上调用方法 (如 .sin(), .cos(), .relu() 等)
         def method_proxy(*args, **kwargs):
-            return self._method_call(name, *args, **kwargs)
+            return self.tracer.create_proxy(name, (self, *args), kwargs)
         return method_proxy
-
-    def _binary_op(self, method_name, other):
-        """记录二元运算"""
-        other_arg = other.node if isinstance(other, Proxy) else other
-        node = self.tracer.graph.call_method(
-            method_name,
-            args=(self.node, other_arg),
-        )
-        return Proxy(node, self.tracer)
-
-    def _method_call(self, method_name, *args, **kwargs):
-        """记录方法调用"""
-        processed_args = tuple(
-            a.node if isinstance(a, Proxy) else a for a in args
-        )
-        processed_kwargs = {
-            k: v.node if isinstance(v, Proxy) else v
-            for k, v in kwargs.items()
-        }
-        node = self.tracer.graph.call_method(
-            method_name,
-            args=(self.node, *processed_args),
-            kwargs=processed_kwargs if processed_kwargs else None,
-        )
-        return Proxy(node, self.tracer)
-
-
-def create_proxy_for_function(tracer, target, args, kwargs=None):
-    """
-    为函数调用创建 Proxy 节点 (用于 torch.sin 等模块级函数)
-
-    当 torch.sin(proxy) 被调用时，sin 函数检测到参数是 Proxy，
-    调用此函数来记录 call_function 节点。
-    """
-    processed_args = tuple(
-        a.node if isinstance(a, Proxy) else a for a in args
-    )
-    processed_kwargs = {
-        k: v.node if isinstance(v, Proxy) else v
-        for k, v in (kwargs or {}).items()
-    }
-    node = tracer.graph.call_function(
-        target,
-        args=processed_args,
-        kwargs=processed_kwargs if processed_kwargs else None,
-    )
-    return Proxy(node, tracer)
 
 
 class Tracer:
@@ -151,41 +176,61 @@ class Tracer:
         Args:
             fn: 要追踪的函数
             example_inputs: 示例输入 (用于确定输入数量和命名)
+
+        Raises:
+            UnsupportedTraceError: 遇到不可 trace 的操作时抛出
         """
-        global _current_tracer
-        old_tracer = _current_tracer
-        _current_tracer = self
-
+        # 获取参数名
         try:
-            # 1. 为每个输入创建 placeholder + Proxy
-            import inspect
-            try:
-                sig = inspect.signature(fn)
-                param_names = list(sig.parameters.keys())
-            except (ValueError, TypeError):
-                param_names = [f"arg_{i}" for i in range(len(example_inputs))]
+            sig = inspect.signature(fn)
+            param_names = list(sig.parameters.keys())
+        except (ValueError, TypeError):
+            param_names = [f"arg_{i}" for i in range(len(example_inputs))]
 
-            proxies = []
-            for i, inp in enumerate(example_inputs):
-                name = param_names[i] if i < len(param_names) else f"arg_{i}"
-                node = self.graph.placeholder(name)
-                proxies.append(Proxy(node, self))
+        # 为每个输入创建 placeholder + Proxy
+        proxies = []
+        for i, inp in enumerate(example_inputs):
+            name = param_names[i] if i < len(param_names) else f"arg_{i}"
+            node = self.graph.placeholder(name)
+            proxies.append(Proxy(node, self))
 
-            # 2. 用 Proxy 执行函数
-            output = fn(*proxies)
+        # 在 tracing 上下文中执行函数
+        with _TraceContext(self):
+            result = fn(*proxies)
 
-            # 3. 收集输出
-            if isinstance(output, Proxy):
-                self.graph.output(output.node)
-            elif isinstance(output, (tuple, list)):
-                output_nodes = tuple(
-                    o.node if isinstance(o, Proxy) else o for o in output
-                )
-                self.graph.output(output_nodes)
-            else:
-                self.graph.output(output)
+        # 收集输出
+        if isinstance(result, Proxy):
+            self.graph.output(result.node)
+        elif isinstance(result, (tuple, list)):
+            output_nodes = tuple(
+                o.node if isinstance(o, Proxy) else o for o in result
+            )
+            self.graph.output(output_nodes)
+        else:
+            self.graph.output(result)
 
-            return GraphModule(self.graph)
+        return GraphModule(self.graph)
 
-        finally:
-            _current_tracer = old_tracer
+    def create_proxy(self, target, args, kwargs=None):
+        """创建新的 Proxy 节点"""
+        node = self.graph.call_function(
+            target,
+            self._unwrap(args),
+            self._unwrap(kwargs) if kwargs else None,
+        )
+        return Proxy(node, self)
+
+    def _unwrap(self, value):
+        """将 Proxy 解包为 Node 引用"""
+        if isinstance(value, Proxy):
+            return value.node
+        if isinstance(value, tuple):
+            return tuple(self._unwrap(item) for item in value)
+        if isinstance(value, list):
+            return [self._unwrap(item) for item in value]
+        if isinstance(value, dict):
+            return {key: self._unwrap(item) for key, item in value.items()}
+        return value
+
+
+import inspect
