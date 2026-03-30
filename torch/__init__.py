@@ -17,17 +17,15 @@ from torch._compile import compile
 import torch._logging
 
 
-def sin(x):
+def sin(input_tensor):
     """torch.sin -- 逐元素正弦函数"""
-    from torch._compile.tracer import is_tracing, get_current_tracer, Proxy, create_proxy_for_function
-    if isinstance(x, Proxy):
-        return create_proxy_for_function(get_current_tracer(), sin, (x,))
-    return x.sin()
+    if hasattr(input_tensor, "sin"):
+        return input_tensor.sin()
+    raise TypeError(f"torch.sin expected Tensor-like input, got {type(input_tensor)}")
 
 
-def cos(x):
+def cos(input_tensor):
     """torch.cos -- 逐元素余弦函数"""
-    from torch._compile.tracer import is_tracing, get_current_tracer, Proxy, create_proxy_for_function
-    if isinstance(x, Proxy):
-        return create_proxy_for_function(get_current_tracer(), cos, (x,))
-    return x.cos()
+    if hasattr(input_tensor, "cos"):
+        return input_tensor.cos()
+    raise TypeError(f"torch.cos expected Tensor-like input, got {type(input_tensor)}")

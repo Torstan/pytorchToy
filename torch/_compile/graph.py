@@ -5,8 +5,7 @@ FX Graph IR -- torch.compile 的核心中间表示
 
 Graph 由 Node 组成，每个 Node 代表一个操作：
   - placeholder: 图的输入参数
-  - call_function: 调用一个函数 (如 torch.sin)
-  - call_method: 调用一个方法 (如 tensor.__add__)
+  - call_function: 调用一个算子 (如 "sin", "add")
   - output: 图的输出
 """
 
@@ -19,13 +18,12 @@ class Node:
     多个 Node 通过 args 中的引用关系形成 DAG。
     """
 
-    def __init__(self, graph, name, op, target, args=(), kwargs=None):
-        self.graph = graph
+    def __init__(self, op, target, args=(), kwargs=None, name=""):
+        self.op = op            # "placeholder" | "call_function" | "output"
+        self.target = target    # 算子名称字符串 (如 "sin", "add")
+        self.args = tuple(args)
+        self.kwargs = dict(kwargs or {})
         self.name = name
-        self.op = op            # "placeholder" | "call_function" | "call_method" | "output"
-        self.target = target    # 函数引用 or 方法名字符串
-        self.args = args        # 输入 (Node 引用或常量)
-        self.kwargs = kwargs or {}
 
     def __repr__(self):
         return f"%{self.name}"
@@ -41,60 +39,46 @@ class Graph:
 
     def __init__(self):
         self.nodes = []
-        self._name_counter = {}
+        self._name_counters = {}
 
-    def _unique_name(self, base):
-        if base not in self._name_counter:
-            self._name_counter[base] = 0
-            return base
-        self._name_counter[base] += 1
-        return f"{base}_{self._name_counter[base]}"
+    def _fresh_name(self, base):
+        """生成唯一名称"""
+        index = self._name_counters.get(base, 0)
+        self._name_counters[base] = index + 1
+        return base if index == 0 else f"{base}_{index}"
 
     def placeholder(self, name):
-        node = Node(self, self._unique_name(name), "placeholder", name)
+        node = Node("placeholder", name, name=self._fresh_name(name))
         self.nodes.append(node)
         return node
 
     def call_function(self, target, args=(), kwargs=None):
-        name = getattr(target, '__name__', str(target))
-        node = Node(self, self._unique_name(name), "call_function", target, args, kwargs)
-        self.nodes.append(node)
-        return node
-
-    def call_method(self, method_name, args=(), kwargs=None):
-        node = Node(self, self._unique_name(method_name), "call_method", method_name, args, kwargs)
+        node = Node(
+            "call_function", target,
+            args=tuple(args),
+            kwargs=dict(kwargs or {}),
+            name=self._fresh_name(target),
+        )
         self.nodes.append(node)
         return node
 
     def output(self, value):
-        node = Node(self, "output", "output", "output", (value,))
+        node = Node("output", "output", args=(value,), name="output")
         self.nodes.append(node)
         return node
 
-    def python_code(self):
+    def format_code(self):
         """生成可读的 Python 代码表示（用于调试/日志）"""
-        lines = []
-        lines.append("def forward(self, {}):\n".format(
-            ", ".join(n.name for n in self.nodes if n.op == "placeholder")
-        ))
+        placeholders = [n.target for n in self.nodes if n.op == "placeholder"]
+        lines = [f"def compiled_graph({', '.join(placeholders)}):"]
         for node in self.nodes:
             if node.op == "placeholder":
                 continue
-            elif node.op == "call_function":
-                target_name = _get_target_name(node.target)
-                args_str = ", ".join(_format_arg(a) for a in node.args)
-                if node.kwargs:
-                    kwargs_str = ", ".join(f"{k}={_format_arg(v)}" for k, v in node.kwargs.items())
-                    args_str = f"{args_str}, {kwargs_str}" if args_str else kwargs_str
-                lines.append(f"    {node.name} = {target_name}({args_str})\n")
-            elif node.op == "call_method":
-                self_arg = node.args[0] if node.args else None
-                rest_args = node.args[1:] if len(node.args) > 1 else ()
-                args_str = ", ".join(_format_arg(a) for a in rest_args)
-                lines.append(f"    {node.name} = {_format_arg(self_arg)}.{node.target}({args_str})\n")
-            elif node.op == "output":
-                lines.append(f"    return {_format_arg(node.args[0])}\n")
-        return "".join(lines)
+            if node.op == "call_function":
+                lines.append(f"    {node.name} = {_format_call(node)}")
+            if node.op == "output":
+                lines.append(f"    return {_format_value(node.args[0])}")
+        return "\n".join(lines)
 
 
 class GraphModule:
@@ -115,10 +99,75 @@ class GraphModule:
         return self.forward(*args)
 
     def print_readable(self):
-        code = self.graph.python_code()
+        code = self.graph.format_code()
         print(code)
         return code
 
+
+# ---- 算子分发表 ----
+
+_OP_TABLE = {}
+
+
+def _register_op(name):
+    """注册算子到分发表"""
+    def decorator(fn):
+        _OP_TABLE[name] = fn
+        return fn
+    return decorator
+
+
+@_register_op("sin")
+def _op_sin(args, kwargs):
+    return args[0].sin()
+
+
+@_register_op("cos")
+def _op_cos(args, kwargs):
+    return args[0].cos()
+
+
+@_register_op("add")
+def _op_add(args, kwargs):
+    return args[0] + args[1]
+
+
+@_register_op("sub")
+def _op_sub(args, kwargs):
+    return args[0] - args[1]
+
+
+@_register_op("mul")
+def _op_mul(args, kwargs):
+    return args[0] * args[1]
+
+
+@_register_op("div")
+def _op_div(args, kwargs):
+    return args[0] / args[1]
+
+
+@_register_op("neg")
+def _op_neg(args, kwargs):
+    return -args[0]
+
+
+@_register_op("relu")
+def _op_relu(args, kwargs):
+    return args[0].relu()
+
+
+@_register_op("tanh")
+def _op_tanh(args, kwargs):
+    return args[0].tanh()
+
+
+@_register_op("sum")
+def _op_sum(args, kwargs):
+    return args[0].sum(**kwargs)
+
+
+# ---- 解释执行 ----
 
 def _interpret(graph, args):
     """解释执行 Graph"""
@@ -129,14 +178,12 @@ def _interpret(graph, args):
             env[node.name] = args[arg_idx]
             arg_idx += 1
         elif node.op == "call_function":
-            fn_args = tuple(_resolve(a, env) for a in node.args)
-            fn_kwargs = {k: _resolve(v, env) for k, v in node.kwargs.items()}
-            env[node.name] = node.target(*fn_args, **fn_kwargs)
-        elif node.op == "call_method":
-            resolved_args = tuple(_resolve(a, env) for a in node.args)
-            self_obj = resolved_args[0]
-            method = getattr(self_obj, node.target)
-            env[node.name] = method(*resolved_args[1:])
+            call_args = tuple(_resolve(a, env) for a in node.args)
+            call_kwargs = {k: _resolve(v, env) for k, v in node.kwargs.items()}
+            op_fn = _OP_TABLE.get(node.target)
+            if op_fn is None:
+                raise RuntimeError(f"unsupported compiled target: {node.target}")
+            env[node.name] = op_fn(call_args, call_kwargs)
         elif node.op == "output":
             return _resolve(node.args[0], env)
     return None
@@ -151,16 +198,41 @@ def _resolve(value, env):
     return value
 
 
-def _format_arg(arg):
-    """格式化参数用于代码生成"""
-    if isinstance(arg, Node):
-        return arg.name
-    return repr(arg)
+# ---- 代码生成辅助 ----
+
+# 特殊格式化规则
+_FORMAT_RULES = {
+    "sin": lambda node: f"torch.sin({_format_value(node.args[0])})",
+    "cos": lambda node: f"torch.cos({_format_value(node.args[0])})",
+    "add": lambda node: f"{_format_value(node.args[0])} + {_format_value(node.args[1])}",
+    "sub": lambda node: f"{_format_value(node.args[0])} - {_format_value(node.args[1])}",
+    "mul": lambda node: f"{_format_value(node.args[0])} * {_format_value(node.args[1])}",
+    "div": lambda node: f"{_format_value(node.args[0])} / {_format_value(node.args[1])}",
+    "neg": lambda node: f"-{_format_value(node.args[0])}",
+}
 
 
-def _get_target_name(target):
-    """获取函数的可读名称"""
-    if hasattr(target, '__module__') and hasattr(target, '__name__'):
-        module = target.__module__ or ''
-        return f"{module}.{target.__name__}" if module else target.__name__
-    return str(target)
+def _format_call(node):
+    """格式化 call_function 节点为可读代码"""
+    rule = _FORMAT_RULES.get(node.target)
+    if rule:
+        return rule(node)
+    # 通用格式
+    args = ", ".join(_format_value(a) for a in node.args)
+    kwargs = ", ".join(f"{k}={_format_value(v)}" for k, v in node.kwargs.items())
+    joined = ", ".join(part for part in (args, kwargs) if part)
+    return f"{node.target}({joined})"
+
+
+def _format_value(value):
+    """格式化值为可读字符串"""
+    if isinstance(value, Node):
+        return value.name
+    if isinstance(value, tuple):
+        inner = ", ".join(_format_value(item) for item in value)
+        if len(value) == 1:
+            inner += ","
+        return f"({inner})"
+    if isinstance(value, list):
+        return "[" + ", ".join(_format_value(item) for item in value) + "]"
+    return repr(value)

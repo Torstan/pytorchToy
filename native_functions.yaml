@@ -36,6 +36,16 @@
   binding: .def("relu", &Tensor::relu)
   module_binding: m.def("relu", &native::relu, py::arg("input"))
 
+- func: Tensor sin() const
+  native: "native::sin(*this)"
+  binding: .def("sin", &Tensor::sin)
+  module_binding: m.def("sin", &native::sin, py::arg("input"))
+
+- func: Tensor cos() const
+  native: "native::cos(*this)"
+  binding: .def("cos", &Tensor::cos)
+  module_binding: m.def("cos", &native::cos, py::arg("input"))
+
 - func: float sum() const
   native: "native::sum(*this)"
   binding: .def("sum", &Tensor::sum)

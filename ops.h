@@ -201,6 +201,26 @@ inline Tensor relu(const Tensor& a) {
     return result;
 }
 
+// at::sin
+inline Tensor sin(const Tensor& a) {
+    Tensor result = empty(std::vector<int>(a.sizes()));
+    float* pr = result.data_ptr();
+    for (int i = 0; i < a.numel(); i++) {
+        pr[i] = std::sin(read_elem(a, i));
+    }
+    return result;
+}
+
+// at::cos
+inline Tensor cos(const Tensor& a) {
+    Tensor result = empty(std::vector<int>(a.sizes()));
+    float* pr = result.data_ptr();
+    for (int i = 0; i < a.numel(); i++) {
+        pr[i] = std::cos(read_elem(a, i));
+    }
+    return result;
+}
+
 // at::sum
 inline float sum(const Tensor& a) {
     float s = 0;
