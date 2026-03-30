@@ -388,6 +388,24 @@ class Tensor:
     def tanh(self):
         return Tensor(_C.autograd_tanh(self._c))
 
+    def sin(self):
+        import math
+        sizes = list(self._c.sizes())
+        result = _C.empty(sizes)
+        n = self.numel()
+        for i in range(n):
+            result.flat_set(i, math.sin(self._c.flat_get(i)))
+        return Tensor(result)
+
+    def cos(self):
+        import math
+        sizes = list(self._c.sizes())
+        result = _C.empty(sizes)
+        n = self.numel()
+        for i in range(n):
+            result.flat_set(i, math.cos(self._c.flat_get(i)))
+        return Tensor(result)
+
     # ---- 比较 ----
 
     def gt(self, value):
