@@ -416,16 +416,20 @@ inline Tensor multihead_attention(
 
     Tensor output = result.output;
 
-    // Connect autograd (only out_proj grads computed; in_proj gets zeros)
-    auto fn = std::make_shared<MhaBackward>(
-        query, result.attn_output, Tensor(out_proj_weight),
-        has_bias, num_heads);
+    bool ng = needs_grad(query, in_proj_weight) ||
+              needs_grad(out_proj_weight) ||
+              (has_bias && (needs_grad(in_proj_bias) || needs_grad(out_proj_bias)));
+    if (ng) {
+        auto fn = std::make_shared<MhaBackward>(
+            query, result.attn_output, Tensor(out_proj_weight),
+            has_bias, num_heads);
 
-    connect_input(fn.get(), in_proj_weight);
-    if (has_bias) connect_input(fn.get(), in_proj_bias);
-    connect_input(fn.get(), out_proj_weight);
-    if (has_bias) connect_input(fn.get(), out_proj_bias);
-    set_output(output, fn);
+        connect_input(fn.get(), in_proj_weight);
+        if (has_bias) connect_input(fn.get(), in_proj_bias);
+        connect_input(fn.get(), out_proj_weight);
+        if (has_bias) connect_input(fn.get(), out_proj_bias);
+        set_output(output, fn);
+    }
 
     return output;
 }
@@ -434,7 +438,7 @@ inline Tensor multihead_attention(
 inline Tensor embedding(const Tensor& indices, const Tensor& weight) {
     Tensor result = nn::embedding_forward(indices, weight);
     if (needs_grad(weight)) {
-        int num_emb = std::vector<int>(weight.sizes())[0];
+        int num_emb = weight.sizes()[0];
         auto fn = std::make_shared<EmbeddingBackward>(Tensor(indices), num_emb);
         connect_input(fn.get(), weight);
         set_output(result, fn);
@@ -452,10 +456,6 @@ inline RnnResult rnn(const Tensor& input, const Tensor& hidden, bool has_hidden,
                       const Tensor& weight_ih, const Tensor& weight_hh,
                       const Tensor& bias_ih, const Tensor& bias_hh,
                       bool batch_first) {
-    // 需要保存中间 hidden states 用于 backward
-    auto sizes = std::vector<int>(input.sizes());
-
-    // 运行 forward
     auto result = nn::rnn_forward(input, hidden, has_hidden,
                                     weight_ih, weight_hh, bias_ih, bias_hh,
                                     batch_first);
@@ -512,7 +512,7 @@ inline void backward(const Tensor& loss) {
     if (!creator) {
         throw std::runtime_error("backward: tensor has no creator (not part of computation graph)");
     }
-    Tensor grad_output = native::ones(std::vector<int>(loss.sizes()));
+    Tensor grad_output = native::ones(loss.sizes());
     Engine::backward(creator, grad_output);
 }
 

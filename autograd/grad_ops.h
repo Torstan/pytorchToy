@@ -16,7 +16,7 @@
 namespace autograd_util {
 
 inline Tensor reduce_grad(const Tensor& grad, const std::vector<int>& target_shape) {
-    auto grad_shape = std::vector<int>(grad.sizes());
+    const auto& grad_shape = grad.sizes();
     if (grad_shape == target_shape) return Tensor(grad);
 
     // 如果 target 是标量 [1] 而 grad 是多维的，直接求和
@@ -59,18 +59,7 @@ public:
     }
 
     std::vector<Tensor> apply(const std::vector<Tensor>& grad_outputs) override {
-        const Tensor& grad = grad_outputs[0];
-        Tensor result = native::empty(grad.sizes());
-        float* pr = result.data_ptr();
-        int n = grad.numel();
-        auto* impl = grad.unsafeGetTensorImpl();
-        if (impl->is_contiguous()) {
-            const float* src = impl->data_ptr();
-            for (int i = 0; i < n; i++) pr[i] = src[i] * scalar;
-        } else {
-            for (int i = 0; i < n; i++) pr[i] = impl->read_logical(i) * scalar;
-        }
-        return {result};
+        return {util::scalar_mul(grad_outputs[0], scalar)};
     }
 };
 
@@ -412,8 +401,7 @@ public:
         // 创建全零张量，然后在对应位置填入梯度
         Tensor result = native::empty(orig_shape);
         float* pr = result.data_ptr();
-        auto grad_sizes = std::vector<int>(grad.sizes());
-        int slice_size = grad_sizes[dim];
+        int slice_size = grad.sizes()[dim];
 
         // 计算外层/内层
         int ndim = orig_shape.size();

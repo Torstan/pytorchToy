@@ -57,8 +57,7 @@ public:
                         Tensor g = grad_inputs[i];
                         Tensor cg = g.is_contiguous() ? g : native::contiguous(g);
                         info.leaf->accumulate_grad(
-                            cg.data_ptr(), cg.numel(),
-                            std::vector<int>(cg.sizes()));
+                            cg.data_ptr(), cg.numel(), cg.sizes());
                     }
                 } else if (info.variable) {
                     // System A 兼容：累加梯度到 VariableImpl
@@ -128,7 +127,7 @@ private:
         if (grads.empty()) return {};
         if (grads.size() == 1) return grads;
 
-        Tensor merged = native::empty(std::vector<int>(grads[0].sizes()));
+        Tensor merged = native::empty(grads[0].sizes());
         float* pm = merged.data_ptr();
         int n = merged.numel();
         // 用第一个梯度直接初始化，省去零初始化的额外遍历
