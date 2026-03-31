@@ -62,7 +62,7 @@ inline Tensor add(const Tensor& a, const Tensor& b) {
 inline Tensor add_scalar(const Tensor& a, float s) {
     Tensor result = util::scalar_add(a, s);
     if (needs_grad(a)) {
-        auto fn = std::make_shared<ScalarAddBackward>();
+        auto fn = std::make_shared<PassthroughBackward>();
         connect_input(fn.get(), a);
         set_output(result, fn);
     }
@@ -84,7 +84,7 @@ inline Tensor sub(const Tensor& a, const Tensor& b) {
 inline Tensor sub_scalar(const Tensor& a, float s) {
     Tensor result = util::scalar_add(a, -s);
     if (needs_grad(a)) {
-        auto fn = std::make_shared<SubScalarBackward>();
+        auto fn = std::make_shared<PassthroughBackward>();
         connect_input(fn.get(), a);
         set_output(result, fn);
     }

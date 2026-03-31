@@ -43,10 +43,14 @@ inline Tensor linear_forward(const Tensor& input, const Tensor& weight,
     return linear_forward_packed(input, wt, bias, has_bias);
 }
 
+// y = input @ weight^T + b
 // grad_output: [..., out_features]
 // input: [..., in_features]
 // weight: [out_features, in_features]
 // 返回: (grad_input, grad_weight, grad_bias)
+// grad_input = grad_output @ W
+// grad_weight = grad_output^T @ input
+// grad_bias = sum(grad_output, dim=0)
 inline std::tuple<Tensor, Tensor, Tensor> linear_backward(
         const Tensor& grad_output, const Tensor& input, const Tensor& weight) {
     // grad_input = grad_output @ weight  [..., out] @ [out, in] → [..., in]
