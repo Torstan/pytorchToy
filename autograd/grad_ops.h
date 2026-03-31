@@ -133,8 +133,6 @@ public:
     }
 };
 
-using SubScalarBackward = PassthroughBackward;
-
 // NegBackward: y = -x
 class NegBackward : public AutogradFunction {
 public:
@@ -426,4 +424,3 @@ public:
     }
 };
 
-using ScalarAddBackward = PassthroughBackward;

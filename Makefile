@@ -125,4 +125,5 @@ test: $(TEST_BINS)
 clean:
 	rm -f $(TARGET) *.o *.so $(TEST_BINS)
 	rm -rf generated/
+	find . -name "*.pyc" | xargs -I{} rm {}
 	rm -rf build *.egg-info

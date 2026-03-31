@@ -16,6 +16,18 @@
 //
 // 从根节点出发，拓扑排序计算图，依次执行每个节点的 backward，
 // 将梯度分发给上游节点，最终在叶子变量上累加梯度。
+//
+// 例子：
+//   t = x * w
+//   loss = t + t
+//
+// root_fn 是 AddBackward，上游只有一个共享节点 MulBackward。
+// backward 开始时，grad_buffer[AddBackward] = {1}。
+// AddBackward.apply({1}) 会给两个输入各产生一份梯度 1，
+// 由于这两个输入都指向同一个 MulBackward，
+// grad_buffer[MulBackward] 最终会收到 {1, 1}。
+// merge_grads(...) 把它们合成 {2} 后，再调用 MulBackward.apply({2})，
+// 最后把 2 * w 和 2 * x 分别累加到叶子 x、w。
 // ============================================================
 
 class Engine {
@@ -76,6 +88,7 @@ public:
 
 private:
     static std::vector<AutogradFunction*> topological_sort(AutogradFunction* root) {
+        // 反向传播时，有多少下游节点(函数)会把梯度传给我
         std::unordered_map<AutogradFunction*, int> in_degree;
         std::unordered_set<AutogradFunction*> visited;
         std::queue<AutogradFunction*> bfs;
