@@ -356,6 +356,17 @@ PYBIND11_MODULE(_C, m) {
         return autograd::layer_norm(input, weight, bias, true, true, eps);
     }, py::arg("input"), py::arg("weight"), py::arg("bias"), py::arg("eps") = 1e-5f);
     m.def("autograd_embedding", &autograd::embedding);
+    m.def("autograd_rnn", [](const Tensor& input, const Tensor& hidden,
+                               bool has_hidden,
+                               const Tensor& weight_ih, const Tensor& weight_hh,
+                               const Tensor& bias_ih, const Tensor& bias_hh,
+                               bool batch_first) {
+        auto result = autograd::rnn(
+            input, hidden, has_hidden,
+            weight_ih, weight_hh, bias_ih, bias_hh,
+            batch_first);
+        return py::make_tuple(result.output, result.h_n);
+    });
     m.def("autograd_mha", [](const Tensor& query, const Tensor& key, const Tensor& value,
                                const Tensor& in_proj_weight, const Tensor& in_proj_bias,
                                const Tensor& out_proj_weight, const Tensor& out_proj_bias,
