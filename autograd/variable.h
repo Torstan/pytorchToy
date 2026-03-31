@@ -47,13 +47,14 @@ struct VariableImpl {
                 std::vector<int>(grad_to_add.sizes()), 0.0f)));
             grad_defined = true;
         }
-        // 逐元素累加
         float* dst = grad.data_ptr();
         int n = grad.numel();
-        // grad_to_add 可能不连续，使用 read_logical
         auto* src_impl = grad_to_add.unsafeGetTensorImpl();
-        for (int i = 0; i < n; i++) {
-            dst[i] += src_impl->read_logical(i);
+        if (src_impl->is_contiguous()) {
+            const float* src = src_impl->data_ptr();
+            for (int i = 0; i < n; i++) dst[i] += src[i];
+        } else {
+            for (int i = 0; i < n; i++) dst[i] += src_impl->read_logical(i);
         }
     }
 

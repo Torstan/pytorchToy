@@ -287,8 +287,8 @@ PYBIND11_MODULE(_C, m) {
         .def(py::init<py::object>());
 
     // --- 内置 backward 函数 ---
-    py::class_<MulBackward, AutogradFunction, std::shared_ptr<MulBackward>>(m, "MulBackward")
-        .def(py::init<Tensor, Tensor>());
+    py::class_<BroadcastMulBackward, AutogradFunction, std::shared_ptr<BroadcastMulBackward>>(m, "MulBackward")
+        .def(py::init<Tensor, Tensor, std::vector<int>, std::vector<int>>());
 
     py::class_<MulScalarBackward, AutogradFunction, std::shared_ptr<MulScalarBackward>>(m, "MulScalarBackward")
         .def(py::init<float>());

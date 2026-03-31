@@ -31,10 +31,7 @@ public:
     // 要么是叶子变量（variable != null）
     std::vector<InputInfo> inputs;
 
-    // 输入个数
     int num_inputs = 0;
-
-    // 是否需要梯度
     bool requires_grad = true;
 
     // 反向传播接口 — 由子类实现

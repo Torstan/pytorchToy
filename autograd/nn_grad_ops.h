@@ -143,43 +143,29 @@ public:
 };
 
 // MhaBackward: multihead attention
+// Only out_proj gradients are computed; in_proj gets zeros (simplified).
 class MhaBackward : public AutogradFunction {
 public:
-    Tensor saved_query, saved_key, saved_value;
-    Tensor saved_Q_proj, saved_K_proj, saved_V_proj;
-    Tensor saved_attn_weights, saved_attn_output;
-    Tensor W_q, W_k, W_v, W_out;
-    Tensor b_q, b_k, b_v, b_out;
+    Tensor saved_attn_output;
+    Tensor W_out;
     bool has_bias;
     int num_heads;
+    // Saved shape info from query: [seq_q, batch, d_model]
+    int seq_q, batch, d_model;
 
     MhaBackward(
-        Tensor query, Tensor key, Tensor value,
-        Tensor Q_proj, Tensor K_proj, Tensor V_proj,
-        Tensor attn_weights, Tensor attn_output,
-        Tensor wq, Tensor wk, Tensor wv, Tensor wout,
-        Tensor bq, Tensor bk, Tensor bv, Tensor bout,
+        const Tensor& query, Tensor attn_output, Tensor wout,
         bool hb, int nh)
-        : saved_query(std::move(query)), saved_key(std::move(key)),
-          saved_value(std::move(value)),
-          saved_Q_proj(std::move(Q_proj)), saved_K_proj(std::move(K_proj)),
-          saved_V_proj(std::move(V_proj)),
-          saved_attn_weights(std::move(attn_weights)),
-          saved_attn_output(std::move(attn_output)),
-          W_q(std::move(wq)), W_k(std::move(wk)),
-          W_v(std::move(wv)), W_out(std::move(wout)),
-          b_q(std::move(bq)), b_k(std::move(bk)),
-          b_v(std::move(bv)), b_out(std::move(bout)),
+        : saved_attn_output(std::move(attn_output)),
+          W_out(std::move(wout)),
           has_bias(hb), num_heads(nh) {
-        // inputs: in_proj_weight, [in_proj_bias], out_proj.weight, [out_proj.bias]
+        auto q_sizes = query.sizes();
+        seq_q = q_sizes[0]; batch = q_sizes[1]; d_model = q_sizes[2];
         num_inputs = 2 + (has_bias ? 2 : 0);
     }
 
     std::vector<Tensor> apply(const std::vector<Tensor>& grad_outputs) override {
         const Tensor& grad_out = grad_outputs[0];
-
-        auto q_sizes = std::vector<int>(saved_query.sizes());
-        int seq_q = q_sizes[0], batch = q_sizes[1], d_model = q_sizes[2];
         int d_k = d_model / num_heads;
 
         // 1. out_proj backward

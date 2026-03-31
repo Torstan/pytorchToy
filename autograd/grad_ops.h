@@ -48,27 +48,6 @@ inline Tensor reduce_grad(const Tensor& grad, const std::vector<int>& target_sha
 
 } // namespace autograd_util
 
-// MulBackward: z = a * b
-// grad_a = grad_output * b
-// grad_b = grad_output * a
-class MulBackward : public AutogradFunction {
-public:
-    Tensor saved_a;
-    Tensor saved_b;
-
-    MulBackward(Tensor a, Tensor b)
-        : saved_a(std::move(a)), saved_b(std::move(b)) {
-        num_inputs = 2;
-    }
-
-    std::vector<Tensor> apply(const std::vector<Tensor>& grad_outputs) override {
-        const Tensor& grad = grad_outputs[0];
-        Tensor grad_a = native::mul(grad, saved_b);
-        Tensor grad_b = native::mul(grad, saved_a);
-        return {grad_a, grad_b};
-    }
-};
-
 // MulScalarBackward: y = x * scalar
 // grad_x = grad_output * scalar
 class MulScalarBackward : public AutogradFunction {
@@ -81,12 +60,15 @@ public:
 
     std::vector<Tensor> apply(const std::vector<Tensor>& grad_outputs) override {
         const Tensor& grad = grad_outputs[0];
-        // grad * scalar
-        Tensor result = native::empty(std::vector<int>(grad.sizes()));
+        Tensor result = native::empty(grad.sizes());
         float* pr = result.data_ptr();
+        int n = grad.numel();
         auto* impl = grad.unsafeGetTensorImpl();
-        for (int i = 0; i < grad.numel(); i++) {
-            pr[i] = impl->read_logical(i) * scalar;
+        if (impl->is_contiguous()) {
+            const float* src = impl->data_ptr();
+            for (int i = 0; i < n; i++) pr[i] = src[i] * scalar;
+        } else {
+            for (int i = 0; i < n; i++) pr[i] = impl->read_logical(i) * scalar;
         }
         return {result};
     }
@@ -152,16 +134,17 @@ public:
     }
 };
 
-// SubScalarBackward: y = x - scalar
-class SubScalarBackward : public AutogradFunction {
+// PassthroughBackward: gradient passes through unchanged (used for scalar add/sub)
+class PassthroughBackward : public AutogradFunction {
 public:
-    SubScalarBackward() { num_inputs = 1; }
+    PassthroughBackward() { num_inputs = 1; }
 
     std::vector<Tensor> apply(const std::vector<Tensor>& grad_outputs) override {
-        Tensor g(grad_outputs[0]);
-        return {g};
+        return {Tensor(grad_outputs[0])};
     }
 };
+
+using SubScalarBackward = PassthroughBackward;
 
 // NegBackward: y = -x
 class NegBackward : public AutogradFunction {
@@ -341,12 +324,18 @@ public:
 
     std::vector<Tensor> apply(const std::vector<Tensor>& grad_outputs) override {
         const Tensor& grad = grad_outputs[0];
-        Tensor result = native::empty(std::vector<int>(grad.sizes()));
+        Tensor result = native::empty(grad.sizes());
         float* pr = result.data_ptr();
+        int n = grad.numel();
         auto* gi = grad.unsafeGetTensorImpl();
         auto* si = saved_input.unsafeGetTensorImpl();
-        for (int i = 0; i < grad.numel(); i++) {
-            pr[i] = si->read_logical(i) > 0 ? gi->read_logical(i) : 0.0f;
+        if (gi->is_contiguous() && si->is_contiguous()) {
+            const float* pg = gi->data_ptr();
+            const float* ps = si->data_ptr();
+            for (int i = 0; i < n; i++) pr[i] = ps[i] > 0 ? pg[i] : 0.0f;
+        } else {
+            for (int i = 0; i < n; i++)
+                pr[i] = si->read_logical(i) > 0 ? gi->read_logical(i) : 0.0f;
         }
         return {result};
     }
@@ -363,13 +352,20 @@ public:
 
     std::vector<Tensor> apply(const std::vector<Tensor>& grad_outputs) override {
         const Tensor& grad = grad_outputs[0];
-        Tensor result = native::empty(std::vector<int>(grad.sizes()));
+        Tensor result = native::empty(grad.sizes());
         float* pr = result.data_ptr();
+        int n = grad.numel();
         auto* gi = grad.unsafeGetTensorImpl();
         auto* oi = saved_output.unsafeGetTensorImpl();
-        for (int i = 0; i < grad.numel(); i++) {
-            float o = oi->read_logical(i);
-            pr[i] = gi->read_logical(i) * (1.0f - o * o);
+        if (gi->is_contiguous() && oi->is_contiguous()) {
+            const float* pg = gi->data_ptr();
+            const float* po = oi->data_ptr();
+            for (int i = 0; i < n; i++) pr[i] = pg[i] * (1.0f - po[i] * po[i]);
+        } else {
+            for (int i = 0; i < n; i++) {
+                float o = oi->read_logical(i);
+                pr[i] = gi->read_logical(i) * (1.0f - o * o);
+            }
         }
         return {result};
     }
@@ -442,13 +438,4 @@ public:
     }
 };
 
-// ScalarAddBackward: y = x + scalar
-class ScalarAddBackward : public AutogradFunction {
-public:
-    ScalarAddBackward() { num_inputs = 1; }
-
-    std::vector<Tensor> apply(const std::vector<Tensor>& grad_outputs) override {
-        Tensor g(grad_outputs[0]);
-        return {g};
-    }
-};
+using ScalarAddBackward = PassthroughBackward;

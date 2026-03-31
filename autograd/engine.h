@@ -41,20 +41,15 @@ public:
             auto it = grad_buffer.find(fn);
             if (it == grad_buffer.end()) continue;
 
-            // 合并梯度
             std::vector<Tensor> merged = merge_grads(it->second);
-
-            // 调用 backward
             std::vector<Tensor> grad_inputs = fn->apply(merged);
 
-            // 分发梯度给输入
             for (int i = 0; i < static_cast<int>(fn->inputs.size()); i++) {
                 if (i >= static_cast<int>(grad_inputs.size())) break;
 
                 const InputInfo& info = fn->inputs[i];
 
                 if (info.fn) {
-                    // 非叶子：传给上游函数节点
                     grad_buffer[info.fn.get()].push_back(grad_inputs[i]);
                 } else if (info.leaf) {
                     // 新系统叶子：累加梯度到 TensorImpl
