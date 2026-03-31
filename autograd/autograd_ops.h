@@ -416,13 +416,9 @@ inline Tensor multihead_attention(
 
     Tensor output = result.output;
 
-    // Connect autograd
+    // Connect autograd (only out_proj grads computed; in_proj gets zeros)
     auto fn = std::make_shared<MhaBackward>(
-        Tensor(query), Tensor(key), Tensor(value),
-        result.Q_proj, result.K_proj, result.V_proj,
-        result.attn_weights, result.attn_output,
-        W_q, W_k, W_v, Tensor(out_proj_weight),
-        b_q, b_k, b_v, Tensor(out_proj_bias),
+        query, result.attn_output, Tensor(out_proj_weight),
         has_bias, num_heads);
 
     connect_input(fn.get(), in_proj_weight);

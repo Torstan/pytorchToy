@@ -145,7 +145,8 @@ class Variable:
         result = Variable(result_tensor, requires_grad=any_requires_grad)
 
         if any_requires_grad:
-            mul_fn = _C.MulBackward(self.data._c, other.data._c)
+            mul_fn = _C.MulBackward(self.data._c, other.data._c,
+                                     list(self.data.shape), list(other.data.shape))
             mul_fn.num_inputs = 2
             mul_fn.requires_grad = True
 

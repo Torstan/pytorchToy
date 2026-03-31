@@ -55,7 +55,7 @@ inline Tensor empty(std::vector<int> shape) {
 // View 操作（零拷贝，共享 Storage）
 // ============================================================
 
-// contiguous — 如果已经连续直接返回自身，否则拷贝到新的连续 storage
+// contiguous - 创建连续存储的Tensor，如果is_contiguous直接返回自身，否则拷贝到新的连续 storage
 inline Tensor contiguous(const Tensor& self) {
     if (self.is_contiguous()) return Tensor(self);
     Tensor result = empty(std::vector<int>(self.sizes()));

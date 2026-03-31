@@ -25,7 +25,8 @@ struct Storage {
 
     explicit Storage(int size, float fill_value = 0.0f) : data(size, fill_value) {}
     Storage() = default;
-
+    Storage(const Storage&) = delete;
+    Storage& operator= (const Storage&) = delete;
     int nbytes() const { return static_cast<int>(data.size()); }
     float* data_ptr() { return data.data(); }
     const float* data_ptr() const { return data.data(); }
