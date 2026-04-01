@@ -24,14 +24,6 @@ namespace util {
 // - 高维: 最后两维做矩阵乘，前面的维度做广播
 // ============================================================
 
-// ---- 矩阵乘法入口 (委托到 cache-oblivious 递归内核) ----
-static inline void matmul_ikj(
-    const float* A, const float* B, float* C,
-    int M, int K, int N)
-{
-    gemm::matmul(A, B, C, M, K, N);
-}
-
 inline Tensor batched_matmul(const Tensor& a, const Tensor& b) {
     int a_dim = a.dim();
     int b_dim = b.dim();
@@ -46,7 +38,7 @@ inline Tensor batched_matmul(const Tensor& a, const Tensor& b) {
         Tensor ca = a.is_contiguous() ? Tensor(a) : native::contiguous(a);
         Tensor cb = b.is_contiguous() ? Tensor(b) : native::contiguous(b);
         Tensor result = native::empty({M, N});
-        matmul_ikj(ca.data_ptr(), cb.data_ptr(), result.data_ptr(), M, K, N);
+        gemm::matmul(ca.data_ptr(), cb.data_ptr(), result.data_ptr(), M, K, N);
         return result;
     }
 
@@ -74,7 +66,7 @@ inline Tensor batched_matmul(const Tensor& a, const Tensor& b) {
         Tensor result = native::empty({B, M, N});
         float* pr = result.data_ptr();
         for (int batch = 0; batch < B; batch++)
-            matmul_ikj(pa + batch * a_mat_size, pb + batch * b_mat_size,
+            gemm::matmul(pa + batch * a_mat_size, pb + batch * b_mat_size,
                        pr + batch * r_mat_size, M, K, N);
         return result;
     }
@@ -88,7 +80,7 @@ inline Tensor batched_matmul(const Tensor& a, const Tensor& b) {
         for (int b1 = 0; b1 < B1; b1++)
             for (int b2 = 0; b2 < B2; b2++) {
                 int idx = b1 * B2 + b2;
-                matmul_ikj(pa + idx * a_mat_size, pb + idx * b_mat_size,
+                gemm::matmul(pa + idx * a_mat_size, pb + idx * b_mat_size,
                            pr + idx * r_mat_size, M, K, N);
             }
         return result;
@@ -118,7 +110,7 @@ inline Tensor batched_matmul(const Tensor& a, const Tensor& b) {
         int a_offset = broadcast_flat_idx(coords, a_batch, a_batch_strides, batch_shape.size()) * a_mat_size;
         int b_offset = broadcast_flat_idx(coords, b_batch, b_batch_strides, batch_shape.size()) * b_mat_size;
         int r_offset = batch * r_mat_size;
-        matmul_ikj(pa + a_offset, pb + b_offset, pr + r_offset, M, K, N);
+        gemm::matmul(pa + a_offset, pb + b_offset, pr + r_offset, M, K, N);
     }
     return result;
 }

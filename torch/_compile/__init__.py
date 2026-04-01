@@ -33,7 +33,13 @@ def _value_signature(value):
     if isinstance(value, Tensor):
         dtype = getattr(getattr(value, "_dtype", None), "name",
                         repr(getattr(value, "_dtype", None)))
-        return ("tensor", tuple(value.shape), dtype, value.requires_grad)
+        return (
+            "tensor",
+            tuple(value.shape),
+            dtype,
+            value.requires_grad,
+            value.is_contiguous(),
+        )
     if isinstance(value, (int, float, str, bool, type(None))):
         return (type(value).__name__, value)
     if isinstance(value, tuple):

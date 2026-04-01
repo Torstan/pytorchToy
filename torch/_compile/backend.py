@@ -9,6 +9,10 @@ Backend 编译器 -- 将 GraphModule 编译为可执行 callable
 """
 
 from torch._compile.graph import GraphModule
+from torch._compile.pointwise import (
+    PointwiseLoweringError,
+    lower_pointwise_graph,
+)
 
 
 # ---- Backend Registry ----
@@ -48,6 +52,33 @@ def eager_backend(graph_module, example_inputs):
     """
     def compiled_fn(*args):
         return graph_module(*args)
+    return compiled_fn
+
+
+@register_backend("inductor")
+def inductor_backend(graph_module, example_inputs):
+    """
+    Inductor backend: 优先走 pointwise fused fast path
+
+    第一阶段只覆盖 inference-only 的纯逐元素图。
+    不满足条件时回退到 GraphModule 解释执行，保留完整语义。
+    """
+    try:
+        program = lower_pointwise_graph(graph_module, example_inputs)
+        compiled_program = program.compile_cpp()
+    except PointwiseLoweringError:
+        def compiled_fn(*args):
+            return graph_module(*args)
+        return compiled_fn
+
+    def compiled_fn(*args):
+        if not program.can_run_with(args):
+            return graph_module(*args)
+
+        from torch.tensor import Tensor
+
+        c_args = [arg._c for arg in args]
+        return Tensor(compiled_program.run(c_args))
     return compiled_fn
 
 
