@@ -68,18 +68,9 @@ class Tensor:
 
     @property
     def _grad_fn(self):
-        """兼容旧代码：返回 creator 或 Python GradFn"""
-        # 先检查 Python 侧的 _grad_fn (System B 兼容)
-        pfn = self.__dict__.get('_py_grad_fn')
-        if pfn is not None:
-            return pfn
+        """返回 C++ autograd creator"""
         c = self._c.get_creator()
         return c if c is not None else None
-
-    @_grad_fn.setter
-    def _grad_fn(self, value):
-        """兼容 System B: 允许 Python 侧设置 _grad_fn"""
-        self.__dict__['_py_grad_fn'] = value
 
     def dim(self):
         return self._c.dim()
@@ -131,32 +122,10 @@ class Tensor:
     def backward(self):
         """执行反向传播"""
         if self._c.has_creator():
-            # C++ backward — 处理主图
             _C.autograd_backward(self._c)
-            # 之后检查是否有 Python _grad_fn 节点需要继续传播
-            # (例如 RNN 的 output 在 C++ 被视为叶子，但有 Python grad_fn)
-            self._continue_python_backward()
-        elif self.__dict__.get('_py_grad_fn') is not None:
-            from torch.autograd_engine import backward as py_backward
-            py_backward(self)
         else:
             raise RuntimeError("backward: tensor has no grad_fn")
 
-    def _continue_python_backward(self):
-        """
-        C++ backward 完成后，检查有 Python _grad_fn 的张量是否收到了 C++ grad。
-        如果是，从那些张量继续 Python backward。
-        """
-        from torch.autograd_engine import backward as py_backward
-        from torch.autograd_engine import iter_mixed_roots
-
-        seen = set()
-        for root, grad in iter_mixed_roots():
-            root_id = id(root)
-            if root_id in seen:
-                continue
-            seen.add(root_id)
-            py_backward(root, grad_output=grad)
 
     def zero_grad(self):
         self._c.zero_grad()
