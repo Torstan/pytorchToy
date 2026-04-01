@@ -8,7 +8,13 @@ Pointwise graph lowering for the toy inductor backend.
   - 所有 Tensor 输入 shape 完全一致
 """
 
+import ctypes
 from dataclasses import dataclass
+import hashlib
+import os
+import shutil
+import subprocess
+import tempfile
 
 
 _VALUE_KIND_TO_INT = {
@@ -32,6 +38,7 @@ _OP_KIND_TO_INT = {
 _UNARY_TARGETS = {"sin", "cos", "relu", "tanh", "neg"}
 _BINARY_TARGETS = {"add", "sub", "mul", "div"}
 _SUPPORTED_TARGETS = _UNARY_TARGETS | _BINARY_TARGETS
+_NATIVE_KERNEL_CACHE = {}
 
 
 class PointwiseLoweringError(RuntimeError):
@@ -80,12 +87,12 @@ class PointwiseProgram:
     instructions: list[Instruction]
     output: ValueRef
 
-    def compile_cpp(self):
+    def compile_interpreter(self):
         import _C
 
         output_kind, output_index = self.output.encode()
         encoded_instructions = [instr.encode() for instr in self.instructions]
-        return _C.CompiledPointwiseProgram(
+        return CppPointwiseKernel(_C.CompiledPointwiseProgram(
             list(self.shape),
             self.num_inputs,
             self.num_temps,
@@ -93,7 +100,163 @@ class PointwiseProgram:
             encoded_instructions,
             output_kind,
             output_index,
+        ))
+
+    def compile(self):
+        try:
+            return self.compile_native()
+        except PointwiseLoweringError:
+            return self.compile_interpreter()
+
+    def compile_native(self):
+        if os.name == "nt":
+            raise PointwiseLoweringError("native pointwise JIT is only enabled on POSIX")
+
+        compiler = shutil.which("g++") or shutil.which("clang++")
+        if compiler is None:
+            raise PointwiseLoweringError("no C++ compiler available for native pointwise JIT")
+
+        symbol = f"pointwise_{hashlib.sha256(self.render_signature().encode('utf-8')).hexdigest()[:16]}"
+        source = self.render_native_source(symbol)
+        key = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        cached = _NATIVE_KERNEL_CACHE.get(key)
+        if cached is not None:
+            return cached
+
+        cache_dir = os.path.join(tempfile.gettempdir(), "pytorchtoy_pointwise")
+        os.makedirs(cache_dir, exist_ok=True)
+        file_stem = f"pointwise_{key[:16]}"
+        cpp_path = os.path.join(cache_dir, f"{file_stem}.cpp")
+        so_path = os.path.join(cache_dir, f"{file_stem}.so")
+
+        if not os.path.exists(so_path):
+            with open(cpp_path, "w", encoding="utf-8") as source_file:
+                source_file.write(source)
+            cmd = [
+                compiler,
+                "-shared",
+                "-fPIC",
+                "-O3",
+                "-std=c++17",
+                "-march=native",
+                "-ffast-math",
+                cpp_path,
+                "-o",
+                so_path,
+            ]
+            try:
+                subprocess.run(
+                    cmd,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except (OSError, subprocess.CalledProcessError) as exc:
+                detail = getattr(exc, "stderr", "") or str(exc)
+                raise PointwiseLoweringError(
+                    f"native pointwise JIT compile failed: {detail.strip()}"
+                ) from exc
+
+        try:
+            library = ctypes.CDLL(so_path)
+            kernel_fn = getattr(library, symbol)
+        except (AttributeError, OSError) as exc:
+            raise PointwiseLoweringError(
+                f"native pointwise JIT load failed: {exc}"
+            ) from exc
+
+        kernel_fn.argtypes = [ctypes.c_void_p] * (self.num_inputs + 1)
+        kernel_fn.restype = None
+
+        kernel = NativePointwiseKernel(
+            shape=self.shape,
+            num_inputs=self.num_inputs,
+            symbol=symbol,
+            library=library,
+            kernel_fn=kernel_fn,
         )
+        _NATIVE_KERNEL_CACHE[key] = kernel
+        return kernel
+
+    def render_native_source(self, symbol_name):
+        args = [
+            f"const float* __restrict__ in{i}"
+            for i in range(self.num_inputs)
+        ]
+        args.append("float* __restrict__ out")
+
+        lines = [
+            "#include <cmath>",
+            "#include <limits>",
+            "",
+            f'extern "C" __attribute__((visibility("default")))',
+            f"void {symbol_name}({', '.join(args)}) {{",
+            "    #if defined(__GNUC__)",
+            "    #pragma GCC ivdep",
+            "    #endif",
+            f"    for (int i = 0; i < {self.numel}; ++i) {{",
+        ]
+
+        for instr in self.instructions:
+            lines.append(f"        float t{instr.dst} = {self._render_expr(instr)};")
+
+        lines.append(f"        out[i] = {self._render_value_ref(self.output)};")
+        lines.append("    }")
+        lines.append("}")
+        return "\n".join(lines) + "\n"
+
+    @property
+    def numel(self):
+        total = 1
+        for size in self.shape:
+            total *= size
+        return total
+
+    def render_signature(self):
+        encoded_instructions = [instr.encode() for instr in self.instructions]
+        return repr(
+            (
+                self.shape,
+                self.num_inputs,
+                self.num_temps,
+                tuple(self.consts),
+                tuple(encoded_instructions),
+                self.output.encode(),
+            )
+        )
+
+    def _render_expr(self, instr):
+        lhs = self._render_value_ref(instr.lhs)
+        if instr.op == "sin":
+            return f"std::sin({lhs})"
+        if instr.op == "cos":
+            return f"std::cos({lhs})"
+        if instr.op == "relu":
+            return f"(({lhs}) > 0.0f ? ({lhs}) : 0.0f)"
+        if instr.op == "tanh":
+            return f"std::tanh({lhs})"
+        if instr.op == "neg":
+            return f"-({lhs})"
+
+        rhs = self._render_value_ref(instr.rhs)
+        if instr.op == "add":
+            return f"({lhs}) + ({rhs})"
+        if instr.op == "sub":
+            return f"({lhs}) - ({rhs})"
+        if instr.op == "mul":
+            return f"({lhs}) * ({rhs})"
+        if instr.op == "div":
+            return f"({lhs}) / ({rhs})"
+        raise PointwiseLoweringError(f"unsupported codegen op: {instr.op}")
+
+    def _render_value_ref(self, value_ref):
+        if value_ref.kind == "input":
+            return f"in{value_ref.index}[i]"
+        if value_ref.kind == "temp":
+            return f"t{value_ref.index}"
+        if value_ref.kind == "const":
+            return _format_cpp_float(self.consts[value_ref.index])
+        raise PointwiseLoweringError(f"unsupported value ref kind: {value_ref.kind}")
 
     def can_run_with(self, args):
         from torch.tensor import Tensor, float32
@@ -112,6 +275,49 @@ class PointwiseProgram:
             if getattr(getattr(arg, "_dtype", None), "name", None) != float32.name:
                 return False
         return True
+
+
+@dataclass
+class NativePointwiseKernel:
+    shape: tuple[int, ...]
+    num_inputs: int
+    symbol: str
+    library: object
+    kernel_fn: object
+
+    def run(self, args):
+        import _C
+        from torch.tensor import Tensor
+
+        if len(args) != self.num_inputs:
+            raise RuntimeError(f"{self.symbol}: input count mismatch")
+
+        output = Tensor(_C.empty(list(self.shape)))
+        call_args = [ctypes.c_void_p(arg._c.data_ptr_address()) for arg in args]
+        call_args.append(ctypes.c_void_p(output._c.data_ptr_address()))
+        self.kernel_fn(*call_args)
+        return output
+
+
+@dataclass
+class CppPointwiseKernel:
+    compiled_program: object
+
+    def run(self, args):
+        from torch.tensor import Tensor
+
+        return Tensor(self.compiled_program.run([arg._c for arg in args]))
+
+
+def _format_cpp_float(value):
+    text = repr(float(value))
+    if text == "nan":
+        return 'std::numeric_limits<float>::quiet_NaN()'
+    if text == "inf":
+        return 'std::numeric_limits<float>::infinity()'
+    if text == "-inf":
+        return '-std::numeric_limits<float>::infinity()'
+    return f"{text}f"
 
 
 def lower_pointwise_graph(graph_module, example_inputs):

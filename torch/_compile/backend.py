@@ -65,20 +65,14 @@ def inductor_backend(graph_module, example_inputs):
     """
     try:
         program = lower_pointwise_graph(graph_module, example_inputs)
-        compiled_program = program.compile_cpp()
+        compiled_program = program.compile()
     except PointwiseLoweringError:
         def compiled_fn(*args):
             return graph_module(*args)
         return compiled_fn
 
     def compiled_fn(*args):
-        if not program.can_run_with(args):
-            return graph_module(*args)
-
-        from torch.tensor import Tensor
-
-        c_args = [arg._c for arg in args]
-        return Tensor(compiled_program.run(c_args))
+        return compiled_program.run(args)
     return compiled_fn
 
 

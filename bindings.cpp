@@ -163,6 +163,9 @@ PYBIND11_MODULE(_C, m) {
         .def("data_ptr_id", [](const Tensor& t) {
             return reinterpret_cast<uintptr_t>(t.unsafeGetTensorImpl());
         })
+        .def("data_ptr_address", [](const Tensor& t) {
+            return reinterpret_cast<uintptr_t>(t.data_ptr());
+        })
         // 版本计数 — 用于 autograd in-place 检测
         .def("_version", [](const Tensor& t) {
             return t.unsafeGetTensorImpl()->version();
