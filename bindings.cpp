@@ -13,6 +13,7 @@
 #include <pybind11/stl.h>
 #include <pybind11/functional.h>
 #include "ops.h"
+#include "util/pointwise_fusion.h"
 #include "autograd/variable.h"
 #include "autograd/function.h"
 #include "autograd/grad_ops.h"
@@ -232,6 +233,25 @@ PYBIND11_MODULE(_C, m) {
 
     // 模块级算子函数（由 codegen.py 从 native_functions.yaml 自动生成）
 #include "generated/module_bindings.inl"
+
+    py::class_<pointwise::CompiledPointwiseProgram>(m, "CompiledPointwiseProgram")
+        .def(
+            py::init<
+                std::vector<int>,
+                int,
+                int,
+                std::vector<float>,
+                std::vector<std::tuple<int, int, int, int, int, int>>,
+                int,
+                int>(),
+            py::arg("shape"),
+            py::arg("num_inputs"),
+            py::arg("num_temps"),
+            py::arg("consts"),
+            py::arg("instructions"),
+            py::arg("output_kind"),
+            py::arg("output_index"))
+        .def("run", &pointwise::CompiledPointwiseProgram::run);
 
     // ============================================================
     // Autograd 绑定

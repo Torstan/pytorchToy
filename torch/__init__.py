@@ -15,6 +15,24 @@ import torch.optim
 from torch.autograd_engine import no_grad
 from torch._compile import compile
 import torch._logging
+import torch.testing
+
+
+def set_num_threads(num):
+    """设置线程数 (pytorchToy 无多线程运行时，仅做兼容)"""
+    pass
+
+
+def get_num_threads():
+    """获取线程数"""
+    return 1
+
+
+def relu(input_tensor):
+    """torch.relu -- 逐元素 ReLU"""
+    if hasattr(input_tensor, "relu"):
+        return input_tensor.relu()
+    raise TypeError(f"torch.relu expected Tensor-like input, got {type(input_tensor)}")
 
 
 def sin(input_tensor):
