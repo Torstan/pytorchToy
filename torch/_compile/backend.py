@@ -8,10 +8,9 @@ Backend 编译器 -- 将 GraphModule 编译为可执行 callable
   - fuse_backend: 简单的算子融合 (将连续逐元素操作合并)
 """
 
-from torch._compile.graph import GraphModule
 from torch._compile.pointwise import (
     PointwiseLoweringError,
-    lower_pointwise_graph,
+    compile_graph_module,
 )
 
 
@@ -60,12 +59,12 @@ def inductor_backend(graph_module, example_inputs):
     """
     Inductor backend: 优先走 pointwise fused fast path
 
-    第一阶段只覆盖 inference-only 的纯逐元素图。
-    不满足条件时回退到 GraphModule 解释执行，保留完整语义。
+    先尝试整图 pointwise 编译；失败后再尝试图内局部 pointwise
+    region 的混合执行。仍然无法覆盖时回退到 GraphModule 解释执行，
+    保留完整语义。
     """
     try:
-        program = lower_pointwise_graph(graph_module, example_inputs)
-        compiled_program = program.compile()
+        compiled_program = compile_graph_module(graph_module, example_inputs)
     except PointwiseLoweringError:
         def compiled_fn(*args):
             return graph_module(*args)
