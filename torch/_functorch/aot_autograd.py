@@ -107,6 +107,16 @@ def _any_requires_grad(args, kwargs):
     return visit(args) or visit(kwargs)
 
 
+def _differentiable_input_indices(args):
+    from torch.tensor import Tensor
+
+    indices = []
+    for index, value in enumerate(args):
+        if isinstance(value, Tensor) and value.requires_grad:
+            indices.append(index)
+    return tuple(indices)
+
+
 def _assert_no_input_mutation(fn, args, kwargs):
     cloned_args = tuple(_clone_structure(arg) for arg in args)
     cloned_kwargs = {key: _clone_structure(value) for key, value in kwargs.items()}
@@ -413,6 +423,66 @@ def _build_backward_graph_or_stub(graph_module, example_inputs):
         return _build_backward_stub_graph(), [grad_output_example], False
 
 
+def _unwrap_backward_result(value):
+    from torch.tensor import Tensor
+
+    if isinstance(value, Tensor):
+        return (value._c,)
+    if isinstance(value, tuple):
+        return tuple(item._c if isinstance(item, Tensor) else item for item in value)
+    if isinstance(value, list):
+        return tuple(item._c if isinstance(item, Tensor) else item for item in value)
+    return (value,)
+
+
+class _CompiledBackwardRuntime:
+    def __init__(self, compiled_bw, forward_inputs):
+        self._compiled_bw = compiled_bw
+        self._forward_inputs = tuple(forward_inputs)
+
+    def _do_backward(self, grad_outputs_list):
+        import _C
+        import torch
+        from torch.tensor import Tensor
+
+        grad_outputs = []
+        for grad in grad_outputs_list:
+            if isinstance(grad, _C.Tensor):
+                grad_outputs.append(Tensor(grad))
+            else:
+                grad_outputs.append(grad)
+
+        with torch.no_grad():
+            result = self._compiled_bw(*self._forward_inputs, *grad_outputs)
+        return _unwrap_backward_result(result)
+
+
+def _attach_compiled_backward(output, args, compiled_bw, differentiable_input_indices):
+    import _C
+    from torch.tensor import Tensor
+
+    if not differentiable_input_indices:
+        return output
+    if not isinstance(output, Tensor):
+        raise NotImplementedError(
+            "AOTAutograd-mini runtime compiled backward only supports Tensor outputs"
+        )
+
+    py_fn = _C.PyFunction(_CompiledBackwardRuntime(compiled_bw, args))
+    py_fn.num_inputs = len(differentiable_input_indices)
+    py_fn.requires_grad = True
+
+    for index in differentiable_input_indices:
+        inp = args[index]
+        if inp._grad_fn is not None:
+            py_fn.add_previous_function(inp._grad_fn, inp._output_index)
+        else:
+            py_fn.add_leaf_tensor(inp._c)
+
+    output._set_creator(py_fn)
+    return output
+
+
 class AOTFunction:
     def __init__(
         self,
@@ -446,8 +516,10 @@ class AOTFunction:
         tracer = Tracer()
         graph_module = tracer.trace(self._fn, args)
         requires_grad = _any_requires_grad(args, kwargs)
+        differentiable_input_indices = ()
 
         if requires_grad:
+            differentiable_input_indices = _differentiable_input_indices(args)
             compiled_fw = self._fw_compiler(graph_module, list(args))
             backward_graph_module, backward_example_inputs, backward_is_real = _build_backward_graph_or_stub(
                 graph_module,
@@ -473,6 +545,21 @@ class AOTFunction:
             backward_example_inputs=backward_example_inputs,
             backward_is_real=backward_is_real,
         )
+
+        if requires_grad and backward_is_real:
+            def compiled_with_runtime_backward(*runtime_args, **runtime_kwargs):
+                if runtime_kwargs:
+                    raise NotImplementedError("AOTAutograd-mini does not support kwargs yet")
+                output = compiled_fw(*runtime_args)
+                return _attach_compiled_backward(
+                    output,
+                    runtime_args,
+                    compiled_bw,
+                    differentiable_input_indices,
+                )
+
+            return compiled_with_runtime_backward
+
         return compiled_fw
 
 
