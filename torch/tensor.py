@@ -109,6 +109,27 @@ class Tensor:
         return tuple(self._c.sizes())
 
     @property
+    def dtype(self):
+        return self._dtype
+
+    @property
+    def device(self):
+        return "cpu"
+
+    def stride(self):
+        if not self.is_contiguous():
+            raise RuntimeError("stride() only supports contiguous tensors")
+        sizes = list(self.shape)
+        if not sizes:
+            return ()
+        stride = [0] * len(sizes)
+        running = 1
+        for index in range(len(sizes) - 1, -1, -1):
+            stride[index] = running
+            running *= sizes[index]
+        return tuple(stride)
+
+    @property
     def data(self):
         """兼容 Variable 接口：Tensor.data 返回自身"""
         return self

@@ -10,6 +10,14 @@ Graph 由 Node 组成，每个 Node 代表一个操作：
 """
 
 
+def _target_name(target):
+    if isinstance(target, str):
+        return target
+    if hasattr(target, "__name__"):
+        return target.__name__
+    return repr(target)
+
+
 class Node:
     """
     FX 图中的一个节点，对应 PyTorch torch.fx.Node
@@ -18,12 +26,13 @@ class Node:
     多个 Node 通过 args 中的引用关系形成 DAG。
     """
 
-    def __init__(self, op, target, args=(), kwargs=None, name=""):
+    def __init__(self, op, target, args=(), kwargs=None, name="", meta=None):
         self.op = op            # "placeholder" | "call_function" | "output"
-        self.target = target    # 算子名称字符串 (如 "sin", "add")
+        self.target = target    # 算子名称字符串或 callable
         self.args = tuple(args)
         self.kwargs = dict(kwargs or {})
         self.name = name
+        self.meta = dict(meta or {})
 
     def __repr__(self):
         return f"%{self.name}"
@@ -57,7 +66,7 @@ class Graph:
             "call_function", target,
             args=tuple(args),
             kwargs=dict(kwargs or {}),
-            name=self._fresh_name(target),
+            name=self._fresh_name(_target_name(target)),
         )
         self.nodes.append(node)
         return node
@@ -98,9 +107,15 @@ class GraphModule:
     def __call__(self, *args, **kwargs):
         return self.forward(*args)
 
-    def print_readable(self):
+    def propagate_meta(self, example_inputs):
+        from torch.fx.meta import propagate_meta
+
+        return propagate_meta(self, example_inputs)
+
+    def print_readable(self, print_output=True, **_unused):
         code = self.graph.format_code()
-        print(code)
+        if print_output:
+            print(code)
         return code
 
 
@@ -181,6 +196,8 @@ def _interpret(graph, args):
             call_args = tuple(_resolve(a, env) for a in node.args)
             call_kwargs = {k: _resolve(v, env) for k, v in node.kwargs.items()}
             op_fn = _OP_TABLE.get(node.target)
+            if op_fn is None and not isinstance(node.target, str):
+                op_fn = node.target
             if op_fn is None:
                 raise RuntimeError(f"unsupported compiled target: {node.target}")
             env[node.name] = op_fn(call_args, call_kwargs)
@@ -221,7 +238,7 @@ def _format_call(node):
     args = ", ".join(_format_value(a) for a in node.args)
     kwargs = ", ".join(f"{k}={_format_value(v)}" for k, v in node.kwargs.items())
     joined = ", ".join(part for part in (args, kwargs) if part)
-    return f"{node.target}({joined})"
+    return f"{_target_name(node.target)}({joined})"
 
 
 def _format_value(value):
