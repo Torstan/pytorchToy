@@ -22,6 +22,8 @@ class AOTCompileState:
     compiled_fw: object
     compiled_bw: object
     requires_grad: bool
+    backward_example_inputs: object = None
+    backward_is_real: bool = False
 
 
 def _value_signature(value):
@@ -128,6 +130,213 @@ def _build_backward_stub_graph():
     return GraphModule(graph)
 
 
+def _target_name(target):
+    if isinstance(target, str):
+        return target
+    if hasattr(target, "__name__"):
+        return target.__name__
+    return repr(target)
+
+
+class _UnsupportedBackwardGraph(RuntimeError):
+    pass
+
+
+def _rebuild_forward_value(bw_graph, cache, value):
+    from torch._compile.graph import Node
+
+    if isinstance(value, Node):
+        cached = cache.get(value)
+        if cached is not None:
+            return cached
+        if value.op == "placeholder":
+            raise RuntimeError(f"missing backward placeholder for {value.target}")
+        if value.op != "call_function":
+            raise _UnsupportedBackwardGraph(
+                f"cannot rebuild forward value for node op {value.op}"
+            )
+        rebuilt = bw_graph.call_function(
+            value.target,
+            args=_rebuild_forward_value(bw_graph, cache, value.args),
+            kwargs=_rebuild_forward_value(bw_graph, cache, value.kwargs),
+        )
+        cache[value] = rebuilt
+        return rebuilt
+    if isinstance(value, tuple):
+        return tuple(_rebuild_forward_value(bw_graph, cache, item) for item in value)
+    if isinstance(value, list):
+        return [_rebuild_forward_value(bw_graph, cache, item) for item in value]
+    if isinstance(value, dict):
+        return {key: _rebuild_forward_value(bw_graph, cache, item) for key, item in value.items()}
+    return value
+
+
+def _zeros_like_graph_value(bw_graph, cache, value):
+    primal = _rebuild_forward_value(bw_graph, cache, value)
+    return bw_graph.call_function("mul", (primal, 0.0))
+
+
+def _build_backward_graph(graph_module, example_inputs):
+    from torch._compile.graph import Node
+    from torch.tensor import Tensor
+
+    output_example = graph_module(*example_inputs)
+    if not hasattr(output_example, "shape"):
+        raise _UnsupportedBackwardGraph("backward graph only supports Tensor outputs")
+
+    grad_output_example = output_example * 0.0 + 1.0
+
+    bw_graph = Graph()
+    rebuilt = {}
+    differentiable_placeholders = []
+
+    nodes = list(graph_module.graph.nodes)
+    if not nodes or nodes[-1].op != "output":
+        raise _UnsupportedBackwardGraph("forward graph is missing output node")
+    output_value = nodes[-1].args[0]
+    if isinstance(output_value, (tuple, list, dict)):
+        raise _UnsupportedBackwardGraph("backward graph only supports single Tensor outputs")
+    if not isinstance(output_value, Node):
+        raise _UnsupportedBackwardGraph("backward graph expects Tensor node output")
+
+    def assert_no_grad_constants(value):
+        if isinstance(value, Tensor) and value.requires_grad:
+            raise _UnsupportedBackwardGraph(
+                "backward graph for lifted parameter/buffer constants is not implemented yet"
+            )
+        if isinstance(value, tuple):
+            for item in value:
+                assert_no_grad_constants(item)
+            return
+        if isinstance(value, list):
+            for item in value:
+                assert_no_grad_constants(item)
+            return
+        if isinstance(value, dict):
+            for item in value.values():
+                assert_no_grad_constants(item)
+
+    for node in nodes:
+        if node.op != "call_function":
+            continue
+        assert_no_grad_constants(node.args)
+        assert_no_grad_constants(node.kwargs)
+
+    placeholder_index = 0
+    for node in nodes:
+        if node.op != "placeholder":
+            continue
+        placeholder = bw_graph.placeholder(node.target)
+        rebuilt[node] = placeholder
+        example_value = example_inputs[placeholder_index]
+        placeholder_index += 1
+        if getattr(example_value, "requires_grad", False):
+            differentiable_placeholders.append(node)
+
+    grad_output = bw_graph.placeholder("grad_output")
+    grad_map = {output_value: grad_output}
+
+    def accumulate_grad(target, grad_value):
+        if not isinstance(target, Node):
+            return
+        existing = grad_map.get(target)
+        if existing is None:
+            grad_map[target] = grad_value
+            return
+        grad_map[target] = bw_graph.call_function("add", (existing, grad_value))
+
+    for node in reversed(nodes[:-1]):
+        if node.op != "call_function":
+            continue
+        grad_value = grad_map.get(node)
+        if grad_value is None:
+            continue
+
+        target_name = _target_name(node.target)
+        args = node.args
+
+        if target_name == "add":
+            accumulate_grad(args[0], grad_value)
+            accumulate_grad(args[1], grad_value)
+            continue
+
+        if target_name == "sub":
+            accumulate_grad(args[0], grad_value)
+            accumulate_grad(args[1], bw_graph.call_function("neg", (grad_value,)))
+            continue
+
+        if target_name == "mul":
+            lhs = _rebuild_forward_value(bw_graph, rebuilt, args[0])
+            rhs = _rebuild_forward_value(bw_graph, rebuilt, args[1])
+            accumulate_grad(args[0], bw_graph.call_function("mul", (grad_value, rhs)))
+            accumulate_grad(args[1], bw_graph.call_function("mul", (grad_value, lhs)))
+            continue
+
+        if target_name == "div":
+            lhs = _rebuild_forward_value(bw_graph, rebuilt, args[0])
+            rhs = _rebuild_forward_value(bw_graph, rebuilt, args[1])
+            rhs_sq = bw_graph.call_function("mul", (rhs, rhs))
+            neg_lhs = bw_graph.call_function("neg", (lhs,))
+            rhs_term = bw_graph.call_function("div", (neg_lhs, rhs_sq))
+            accumulate_grad(args[0], bw_graph.call_function("div", (grad_value, rhs)))
+            accumulate_grad(args[1], bw_graph.call_function("mul", (grad_value, rhs_term)))
+            continue
+
+        if target_name == "neg":
+            accumulate_grad(args[0], bw_graph.call_function("neg", (grad_value,)))
+            continue
+
+        if target_name == "tanh":
+            primal = _rebuild_forward_value(bw_graph, rebuilt, args[0])
+            tanh_primal = bw_graph.call_function("tanh", (primal,))
+            tanh_sq = bw_graph.call_function("mul", (tanh_primal, tanh_primal))
+            slope = bw_graph.call_function("sub", (1.0, tanh_sq))
+            accumulate_grad(args[0], bw_graph.call_function("mul", (grad_value, slope)))
+            continue
+
+        if target_name == "sin":
+            primal = _rebuild_forward_value(bw_graph, rebuilt, args[0])
+            slope = bw_graph.call_function("cos", (primal,))
+            accumulate_grad(args[0], bw_graph.call_function("mul", (grad_value, slope)))
+            continue
+
+        if target_name == "cos":
+            primal = _rebuild_forward_value(bw_graph, rebuilt, args[0])
+            sine = bw_graph.call_function("sin", (primal,))
+            neg_sine = bw_graph.call_function("neg", (sine,))
+            accumulate_grad(args[0], bw_graph.call_function("mul", (grad_value, neg_sine)))
+            continue
+
+        if target_name == "sum":
+            expanded = bw_graph.call_function(
+                "add",
+                (_zeros_like_graph_value(bw_graph, rebuilt, args[0]), grad_value),
+            )
+            accumulate_grad(args[0], expanded)
+            continue
+
+        raise _UnsupportedBackwardGraph(f"unsupported backward target: {target_name}")
+
+    outputs = []
+    for placeholder in differentiable_placeholders:
+        grad_value = grad_map.get(placeholder)
+        if grad_value is None:
+            grad_value = _zeros_like_graph_value(bw_graph, rebuilt, placeholder)
+        outputs.append(grad_value)
+
+    bw_graph.output(tuple(outputs))
+    return GraphModule(bw_graph), [*example_inputs, grad_output_example], True
+
+
+def _build_backward_graph_or_stub(graph_module, example_inputs):
+    try:
+        return _build_backward_graph(graph_module, example_inputs)
+    except _UnsupportedBackwardGraph:
+        output_example = graph_module(*example_inputs)
+        grad_output_example = output_example * 0.0 + 1.0
+        return _build_backward_stub_graph(), [grad_output_example], False
+
+
 class AOTFunction:
     def __init__(
         self,
@@ -164,12 +373,20 @@ class AOTFunction:
 
         if requires_grad:
             compiled_fw = self._fw_compiler(graph_module, list(args))
-            backward_graph_module = _build_backward_stub_graph()
-            compiled_bw = self._bw_compiler(backward_graph_module, [])
+            backward_graph_module, backward_example_inputs, backward_is_real = _build_backward_graph_or_stub(
+                graph_module,
+                list(args),
+            )
+            compiled_bw = self._bw_compiler(
+                backward_graph_module,
+                list(backward_example_inputs),
+            )
         else:
             compiled_fw = self._inference_compiler(graph_module, list(args))
             backward_graph_module = None
             compiled_bw = None
+            backward_example_inputs = None
+            backward_is_real = False
 
         self._last_state = AOTCompileState(
             graph_module=graph_module,
@@ -177,6 +394,8 @@ class AOTFunction:
             compiled_fw=compiled_fw,
             compiled_bw=compiled_bw,
             requires_grad=requires_grad,
+            backward_example_inputs=backward_example_inputs,
+            backward_is_real=backward_is_real,
         )
         return compiled_fw
 

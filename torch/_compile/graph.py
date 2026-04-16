@@ -182,6 +182,37 @@ def _op_sum(args, kwargs):
     return args[0].sum(**kwargs)
 
 
+@_register_op("mm")
+def _op_mm(args, kwargs):
+    del kwargs
+    return args[0].mm(args[1])
+
+
+def _normalize_shape_args(args):
+    if len(args) == 2 and isinstance(args[1], (tuple, list)):
+        return tuple(args[1])
+    return tuple(args[1:])
+
+
+@_register_op("view")
+def _op_view(args, kwargs):
+    del kwargs
+    return args[0].view(*_normalize_shape_args(args))
+
+
+@_register_op("reshape")
+def _op_reshape(args, kwargs):
+    del kwargs
+    return args[0].reshape(*_normalize_shape_args(args))
+
+
+@_register_op("addmm")
+def _op_addmm(args, kwargs):
+    del kwargs
+    bias, lhs, rhs = args
+    return lhs.mm(rhs) + bias
+
+
 # ---- 解释执行 ----
 
 def _interpret(graph, args):
@@ -229,6 +260,7 @@ _FORMAT_RULES = {
     "mul": lambda node: f"{_format_value(node.args[0])} * {_format_value(node.args[1])}",
     "div": lambda node: f"{_format_value(node.args[0])} / {_format_value(node.args[1])}",
     "neg": lambda node: f"-{_format_value(node.args[0])}",
+    "mm": lambda node: f"{_format_value(node.args[0])}.mm({_format_value(node.args[1])})",
 }
 
 
