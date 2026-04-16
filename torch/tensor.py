@@ -72,6 +72,14 @@ class Tensor:
         c = self._c.get_creator()
         return c if c is not None else None
 
+    @property
+    def _output_index(self):
+        return self._c.get_output_index()
+
+    def _set_creator(self, creator, output_index=0):
+        self._c.set_requires_grad(True)
+        self._c.set_creator(creator, output_index)
+
     def dim(self):
         return self._c.dim()
 
