@@ -209,7 +209,9 @@ class Tracer:
         else:
             self.graph.output(result)
 
-        return GraphModule(self.graph)
+        graph_module = GraphModule(self.graph)
+        graph_module.propagate_meta(example_inputs)
+        return graph_module
 
     def create_proxy(self, target, args, kwargs=None):
         """创建新的 Proxy 节点"""
