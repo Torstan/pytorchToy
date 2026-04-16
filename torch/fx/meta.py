@@ -113,6 +113,18 @@ def _mm_meta(args, kwargs):
     )
 
 
+def _t_meta(args, kwargs):
+    del kwargs
+    tensor = args[0]
+    if len(tensor.shape) != 2:
+        raise MetaPropagationError("t expects 2D input")
+    return FakeTensor(
+        (tensor.shape[1], tensor.shape[0]),
+        dtype=tensor.dtype,
+        requires_grad=tensor.requires_grad,
+    )
+
+
 def _addmm_meta(args, kwargs):
     del kwargs
     bias, lhs, rhs = args
@@ -125,6 +137,37 @@ def _addmm_meta(args, kwargs):
             requires_grad=bias.requires_grad or mm_out.requires_grad,
         )
     return mm_out
+
+
+def _shape_tuple(value):
+    shape = getattr(value, "shape", None)
+    if shape is None:
+        raise MetaPropagationError(f"value does not have shape metadata: {type(value)}")
+    return tuple(shape)
+
+
+def _layer_norm_meta(args, kwargs):
+    input_value, weight, bias = args
+    eps = kwargs.get("eps", 1e-5)
+    del eps
+    input_shape = _shape_tuple(input_value)
+    weight_shape = _shape_tuple(weight)
+    bias_shape = _shape_tuple(bias)
+    if len(weight_shape) != 1 or len(bias_shape) != 1:
+        raise MetaPropagationError("layer_norm expects 1D weight and bias")
+    if not input_shape or input_shape[-1] != weight_shape[0] or weight_shape != bias_shape:
+        raise MetaPropagationError(
+            f"layer_norm shape mismatch: input={input_shape}, weight={weight_shape}, bias={bias_shape}"
+        )
+    return FakeTensor(
+        input_shape,
+        dtype=input_value.dtype,
+        requires_grad=(
+            input_value.requires_grad
+            or getattr(weight, "requires_grad", False)
+            or getattr(bias, "requires_grad", False)
+        ),
+    )
 
 
 _META_RULES = {
@@ -141,7 +184,9 @@ _META_RULES = {
     "view": _view_meta,
     "reshape": _view_meta,
     "mm": _mm_meta,
+    "t": _t_meta,
     "addmm": _addmm_meta,
+    "layer_norm": _layer_norm_meta,
 }
 
 

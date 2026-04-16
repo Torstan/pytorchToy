@@ -86,21 +86,26 @@ class PointwiseProgram:
     consts: list[float]
     instructions: list[Instruction]
     output: ValueRef
+    allow_requires_grad: bool = False
 
     def compile_interpreter(self):
         import _C
 
         output_kind, output_index = self.output.encode()
         encoded_instructions = [instr.encode() for instr in self.instructions]
-        return CppPointwiseKernel(_C.CompiledPointwiseProgram(
-            list(self.shape),
-            self.num_inputs,
-            self.num_temps,
-            list(self.consts),
-            encoded_instructions,
-            output_kind,
-            output_index,
-        ))
+        return CppPointwiseKernel(
+            compiled_program=_C.CompiledPointwiseProgram(
+                list(self.shape),
+                self.num_inputs,
+                self.num_temps,
+                list(self.consts),
+                encoded_instructions,
+                output_kind,
+                output_index,
+            ),
+            shape=self.shape,
+            allow_requires_grad=self.allow_requires_grad,
+        )
 
     def compile(self):
         try:
@@ -121,7 +126,15 @@ class PointwiseProgram:
         key = hashlib.sha256(source.encode("utf-8")).hexdigest()
         cached = _NATIVE_KERNEL_CACHE.get(key)
         if cached is not None:
-            return cached
+            library, kernel_fn = cached
+            return NativePointwiseKernel(
+                shape=self.shape,
+                num_inputs=self.num_inputs,
+                symbol=symbol,
+                library=library,
+                kernel_fn=kernel_fn,
+                allow_requires_grad=self.allow_requires_grad,
+            )
 
         cache_dir = os.path.join(tempfile.gettempdir(), "pytorchtoy_pointwise")
         os.makedirs(cache_dir, exist_ok=True)
@@ -168,15 +181,15 @@ class PointwiseProgram:
         kernel_fn.argtypes = [ctypes.c_void_p] * (self.num_inputs + 1)
         kernel_fn.restype = None
 
-        kernel = NativePointwiseKernel(
+        _NATIVE_KERNEL_CACHE[key] = (library, kernel_fn)
+        return NativePointwiseKernel(
             shape=self.shape,
             num_inputs=self.num_inputs,
             symbol=symbol,
             library=library,
             kernel_fn=kernel_fn,
+            allow_requires_grad=self.allow_requires_grad,
         )
-        _NATIVE_KERNEL_CACHE[key] = kernel
-        return kernel
 
     def render_native_source(self, symbol_name):
         args = [
@@ -266,6 +279,7 @@ class NativePointwiseKernel:
     symbol: str
     library: object
     kernel_fn: object
+    allow_requires_grad: bool = False
 
     def run(self, args):
         import _C
@@ -274,8 +288,14 @@ class NativePointwiseKernel:
         if len(args) != self.num_inputs:
             raise RuntimeError(f"{self.symbol}: input count mismatch")
 
+        prepared_args = _prepare_pointwise_runtime_args(
+            args,
+            self.shape,
+            allow_requires_grad=self.allow_requires_grad,
+            kernel_name=self.symbol,
+        )
         output = Tensor(_C.empty(list(self.shape)))
-        call_args = [ctypes.c_void_p(arg._c.data_ptr_address()) for arg in args]
+        call_args = [ctypes.c_void_p(arg._c.data_ptr_address()) for arg in prepared_args]
         call_args.append(ctypes.c_void_p(output._c.data_ptr_address()))
         self.kernel_fn(*call_args)
         return output
@@ -284,11 +304,19 @@ class NativePointwiseKernel:
 @dataclass
 class CppPointwiseKernel:
     compiled_program: object
+    shape: tuple[int, ...]
+    allow_requires_grad: bool = False
 
     def run(self, args):
         from torch.tensor import Tensor
 
-        return Tensor(self.compiled_program.run([arg._c for arg in args]))
+        prepared_args = _prepare_pointwise_runtime_args(
+            args,
+            self.shape,
+            allow_requires_grad=self.allow_requires_grad,
+            kernel_name="CompiledPointwiseProgram",
+        )
+        return Tensor(self.compiled_program.run([arg._c for arg in prepared_args]))
 
 
 def _format_cpp_float(value):
@@ -302,12 +330,67 @@ def _format_cpp_float(value):
     return f"{text}f"
 
 
+def _is_broadcastable_to(input_shape, output_shape):
+    input_shape = list(input_shape)
+    output_shape = list(output_shape)
+    while output_shape:
+        out_dim = output_shape.pop()
+        in_dim = input_shape.pop() if input_shape else 1
+        if in_dim not in (1, out_dim):
+            return False
+    return not input_shape
+
+
+def _prepare_pointwise_runtime_args(args, output_shape, *, allow_requires_grad, kernel_name):
+    prepared_args = []
+    output_shape = tuple(output_shape)
+    for arg in args:
+        if allow_requires_grad and arg.requires_grad:
+            arg = arg.detach()
+        elif arg.requires_grad:
+            raise RuntimeError(f"{kernel_name}: requires_grad input is not supported")
+
+        if tuple(arg.shape) != output_shape:
+            if not _is_broadcastable_to(tuple(arg.shape), output_shape):
+                raise RuntimeError(
+                    f"{kernel_name}: input shape {tuple(arg.shape)} cannot broadcast to {output_shape}"
+                )
+            if len(arg.shape) < len(output_shape):
+                arg = arg.view((1,) * (len(output_shape) - len(arg.shape)) + tuple(arg.shape))
+            arg = arg.expand(output_shape).contiguous()
+        elif not arg.is_contiguous():
+            arg = arg.contiguous()
+
+        prepared_args.append(arg)
+    return prepared_args
+
+
 def _target_name(target):
     if isinstance(target, str):
         return target
     if hasattr(target, "__name__"):
         return target.__name__
     return repr(target)
+
+
+def _broadcast_shapes(lhs_shape, rhs_shape):
+    lhs = list(lhs_shape)
+    rhs = list(rhs_shape)
+    result = []
+    while lhs or rhs:
+        left = lhs.pop() if lhs else 1
+        right = rhs.pop() if rhs else 1
+        if left == 1:
+            result.append(right)
+            continue
+        if right == 1 or left == right:
+            result.append(left)
+            continue
+        raise PointwiseLoweringError(
+            f"cannot broadcast shapes {lhs_shape} and {rhs_shape}"
+        )
+    result.reverse()
+    return tuple(result)
 
 
 def lower_pointwise_graph(graph_module, example_inputs, *, allow_requires_grad=False):
@@ -331,8 +414,7 @@ def lower_pointwise_graph(graph_module, example_inputs, *, allow_requires_grad=F
 
     shape = tuple(tensor_inputs[0].shape)
     for inp in tensor_inputs[1:]:
-        if tuple(inp.shape) != shape:
-            raise PointwiseLoweringError("pointwise fast path requires exact shape matches")
+        shape = _broadcast_shapes(shape, tuple(inp.shape))
 
     graph = graph_module.graph
     env = {}
@@ -417,6 +499,7 @@ def lower_pointwise_graph(graph_module, example_inputs, *, allow_requires_grad=F
         consts=consts,
         instructions=instructions,
         output=output_ref,
+        allow_requires_grad=allow_requires_grad,
     )
 
 
@@ -648,42 +731,83 @@ def _try_compile_single_op(node, env_example):
     if target_name == "mm":
         if len(node.args) != 2 or node.kwargs:
             return None
-        collect_inputs(node.args)
-        kernel = MmKernel()
+        lhs_spec = freeze_inputs(node.args[0])
+        rhs_spec = freeze_inputs(node.args[1])
+        kernel = MmKernel(lhs_spec=lhs_spec, rhs_spec=rhs_spec)
     elif target_name == "addmm":
         if len(node.args) != 3 or node.kwargs:
             return None
-        collect_inputs(node.args)
-        kernel = AddmmKernel()
+        bias_spec = freeze_inputs(node.args[0])
+        lhs_spec = freeze_inputs(node.args[1])
+        rhs_spec = freeze_inputs(node.args[2])
+        kernel = AddmmKernel(
+            bias_spec=bias_spec,
+            lhs_spec=lhs_spec,
+            rhs_spec=rhs_spec,
+        )
     elif target_name == "sum":
         if len(node.args) != 1:
             return None
-        collect_inputs(node.args[0])
+        arg_spec = freeze_inputs(node.args[0])
         kernel = SumKernel(
+            arg_spec=arg_spec,
             dim=node.kwargs.get("dim"),
             keepdim=node.kwargs.get("keepdim", False),
         )
     elif target_name == "t":
         if len(node.args) != 1 or node.kwargs:
             return None
-        collect_inputs(node.args[0])
-        kernel = TransposeKernel()
+        arg_spec = freeze_inputs(node.args[0])
+        kernel = TransposeKernel(arg_spec=arg_spec)
     elif target_name == "view":
         if not node.args or node.kwargs:
             return None
-        collect_inputs(node.args[0])
-        kernel = ViewKernel(_normalize_shape_args(node.args))
+        arg_spec = freeze_inputs(node.args[0])
+        kernel = ViewKernel(arg_spec=arg_spec, shape=_normalize_shape_args(node.args))
     elif target_name == "reshape":
         if not node.args or node.kwargs:
             return None
-        collect_inputs(node.args[0])
-        kernel = ReshapeKernel(_normalize_shape_args(node.args))
-    elif target_name in _SUPPORTED_TARGETS or target_name == "gt":
-        kernel = SingleNodeKernel(
-            target=node.target,
-            args_spec=freeze_inputs(node.args),
-            kwargs_spec=freeze_inputs(node.kwargs),
+        arg_spec = freeze_inputs(node.args[0])
+        kernel = ReshapeKernel(arg_spec=arg_spec, shape=_normalize_shape_args(node.args))
+    elif target_name == "layer_norm":
+        if len(node.args) != 3:
+            return None
+        input_spec = freeze_inputs(node.args[0])
+        weight_spec = freeze_inputs(node.args[1])
+        bias_spec = freeze_inputs(node.args[2])
+        kernel = LayerNormKernel(
+            input_spec=input_spec,
+            weight_spec=weight_spec,
+            bias_spec=bias_spec,
+            eps=node.kwargs.get("eps", 1e-5),
         )
+    elif target_name in _UNARY_TARGETS:
+        if len(node.args) != 1 or node.kwargs:
+            return None
+        kernel = UnaryPointwiseKernel(
+            target=target_name,
+            arg_spec=freeze_inputs(node.args[0]),
+        )
+        collect_inputs(node.args[0])
+    elif target_name in _BINARY_TARGETS:
+        if len(node.args) != 2 or node.kwargs:
+            return None
+        kernel = BinaryPointwiseKernel(
+            target=target_name,
+            lhs_spec=freeze_inputs(node.args[0]),
+            rhs_spec=freeze_inputs(node.args[1]),
+        )
+        collect_inputs(node.args[0])
+        collect_inputs(node.args[1])
+    elif target_name == "gt":
+        if len(node.args) != 2 or node.kwargs:
+            return None
+        kernel = GtKernel(
+            lhs_spec=freeze_inputs(node.args[0]),
+            rhs_spec=freeze_inputs(node.args[1]),
+        )
+        collect_inputs(node.args[0])
+        collect_inputs(node.args[1])
 
     if kernel is None:
         return None
@@ -809,47 +933,134 @@ class SingleNodeKernel:
 
 
 @dataclass
-class MmKernel:
+class UnaryPointwiseKernel:
+    target: str
+    arg_spec: object
+
     def run(self, args):
-        return args[0].mm(args[1])
+        value = _materialize_input_specs(self.arg_spec, args)
+        if self.target == "sin":
+            return value.sin()
+        if self.target == "cos":
+            return value.cos()
+        if self.target == "relu":
+            return value.relu()
+        if self.target == "tanh":
+            return value.tanh()
+        if self.target == "neg":
+            return -value
+        raise RuntimeError(f"unsupported unary pointwise target: {self.target}")
+
+
+@dataclass
+class BinaryPointwiseKernel:
+    target: str
+    lhs_spec: object
+    rhs_spec: object
+
+    def run(self, args):
+        lhs = _materialize_input_specs(self.lhs_spec, args)
+        rhs = _materialize_input_specs(self.rhs_spec, args)
+        if self.target == "add":
+            return lhs + rhs
+        if self.target == "sub":
+            return lhs - rhs
+        if self.target == "mul":
+            return lhs * rhs
+        if self.target == "div":
+            return lhs / rhs
+        raise RuntimeError(f"unsupported binary pointwise target: {self.target}")
+
+
+@dataclass
+class GtKernel:
+    lhs_spec: object
+    rhs_spec: object
+
+    def run(self, args):
+        lhs = _materialize_input_specs(self.lhs_spec, args)
+        rhs = _materialize_input_specs(self.rhs_spec, args)
+        return lhs.gt(rhs)
+
+
+@dataclass
+class MmKernel:
+    lhs_spec: object
+    rhs_spec: object
+
+    def run(self, args):
+        lhs = _materialize_input_specs(self.lhs_spec, args)
+        rhs = _materialize_input_specs(self.rhs_spec, args)
+        return lhs.mm(rhs)
 
 
 @dataclass
 class AddmmKernel:
+    bias_spec: object
+    lhs_spec: object
+    rhs_spec: object
+
     def run(self, args):
-        bias, lhs, rhs = args
+        bias = _materialize_input_specs(self.bias_spec, args)
+        lhs = _materialize_input_specs(self.lhs_spec, args)
+        rhs = _materialize_input_specs(self.rhs_spec, args)
         return lhs.mm(rhs) + bias
 
 
 @dataclass
 class SumKernel:
+    arg_spec: object
     dim: object = None
     keepdim: bool = False
 
     def run(self, args):
-        return args[0].sum(dim=self.dim, keepdim=self.keepdim)
+        value = _materialize_input_specs(self.arg_spec, args)
+        return value.sum(dim=self.dim, keepdim=self.keepdim)
 
 
 @dataclass
 class TransposeKernel:
+    arg_spec: object
+
     def run(self, args):
-        return args[0].t()
+        value = _materialize_input_specs(self.arg_spec, args)
+        return value.t()
 
 
 @dataclass
 class ViewKernel:
+    arg_spec: object
     shape: tuple[int, ...]
 
     def run(self, args):
-        return args[0].view(*self.shape)
+        value = _materialize_input_specs(self.arg_spec, args)
+        return value.view(*self.shape)
 
 
 @dataclass
 class ReshapeKernel:
+    arg_spec: object
     shape: tuple[int, ...]
 
     def run(self, args):
-        return args[0].reshape(*self.shape)
+        value = _materialize_input_specs(self.arg_spec, args)
+        return value.reshape(*self.shape)
+
+
+@dataclass
+class LayerNormKernel:
+    input_spec: object
+    weight_spec: object
+    bias_spec: object
+    eps: float = 1e-5
+
+    def run(self, args):
+        import torch.nn.functional as F
+
+        input_value = _materialize_input_specs(self.input_spec, args)
+        weight = _materialize_input_specs(self.weight_spec, args)
+        bias = _materialize_input_specs(self.bias_spec, args)
+        return F.layer_norm(input_value, weight, bias, eps=self.eps)
 
 
 def _materialize_input_specs(value, args):

@@ -12,9 +12,33 @@ from torch.tensor import Tensor
 
 
 def linear(input, weight, bias=None, packed_weight=None):
+    from torch._compile.tracer import is_tracing
+
+    if is_tracing():
+        import torch._refs as refs
+
+        del packed_weight
+        return refs.linear(input, weight, bias)
+
     return Tensor(_C.autograd_linear(input._c, weight._c,
                   bias._c if bias is not None else None,
                   packed_weight._c if packed_weight is not None else None))
+
+
+def layer_norm(input, weight, bias=None, eps=1e-5):
+    from torch._compile.tracer import current_tracer, is_tracing
+
+    if bias is None:
+        raise NotImplementedError("layer_norm without bias is not supported yet")
+
+    if is_tracing():
+        return current_tracer().create_proxy(
+            "layer_norm",
+            (input, weight, bias),
+            {"eps": eps},
+        )
+
+    return Tensor(_C.autograd_layer_norm(input._c, weight._c, bias._c, eps))
 
 
 def softmax(input, dim=-1):

@@ -32,6 +32,7 @@ def select_decomp_table():
         "reshape": prims.reshape,
         "mm": prims.mm,
         "addmm": refs.addmm,
+        "layer_norm": refs.layer_norm,
     }
 
 

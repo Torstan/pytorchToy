@@ -225,6 +225,13 @@ def _op_addmm(args, kwargs):
     return lhs.mm(rhs) + bias
 
 
+@_register_op("layer_norm")
+def _op_layer_norm(args, kwargs):
+    import torch.nn.functional as F
+
+    return F.layer_norm(*args, **kwargs)
+
+
 # ---- 解释执行 ----
 
 def _interpret(graph, args):
@@ -275,6 +282,10 @@ _FORMAT_RULES = {
     "gt": lambda node: f"{_format_value(node.args[0])}.gt({_format_value(node.args[1])})",
     "t": lambda node: f"{_format_value(node.args[0])}.t()",
     "mm": lambda node: f"{_format_value(node.args[0])}.mm({_format_value(node.args[1])})",
+    "layer_norm": lambda node: (
+        f"layer_norm({_format_value(node.args[0])}, {_format_value(node.args[1])}, "
+        f"{_format_value(node.args[2])}, eps={_format_value(node.kwargs.get('eps', 1e-5))})"
+    ),
 }
 
 
