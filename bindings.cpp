@@ -211,9 +211,15 @@ PYBIND11_MODULE(_C, m) {
             if (!c) return py::none();
             return py::cast(c);
         })
+        .def("set_creator", [](Tensor& t,
+                                std::shared_ptr<AutogradFunction> fn,
+                                int idx) {
+            t.set_creator(std::move(fn), idx);
+        }, py::arg("creator"), py::arg("output_index") = 0)
         .def("has_creator", [](const Tensor& t) {
             return t.get_creator() != nullptr;
         })
+        .def("get_output_index", &Tensor::get_output_index)
         .def("set_requires_grad", &Tensor::set_requires_grad);
 
     // ============================================================
@@ -302,6 +308,9 @@ PYBIND11_MODULE(_C, m) {
             info.output_index = 0;
             info.variable = var.get();
             self.inputs.push_back(std::move(info));
+        })
+        .def("add_leaf_tensor", [](AutogradFunction& self, const Tensor& t) {
+            self.add_leaf(t.unsafeGetTensorImpl());
         })
         .def("apply", &AutogradFunction::apply);
 

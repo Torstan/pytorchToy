@@ -310,7 +310,7 @@ def _target_name(target):
     return repr(target)
 
 
-def lower_pointwise_graph(graph_module, example_inputs):
+def lower_pointwise_graph(graph_module, example_inputs, *, allow_requires_grad=False):
     from torch._compile.graph import Node
     from torch.tensor import Tensor, float32
 
@@ -321,7 +321,7 @@ def lower_pointwise_graph(graph_module, example_inputs):
     for inp in example_inputs:
         if not isinstance(inp, Tensor):
             raise PointwiseLoweringError("pointwise fast path only supports Tensor inputs")
-        if inp.requires_grad:
+        if inp.requires_grad and not allow_requires_grad:
             raise PointwiseLoweringError("requires_grad=True falls back to eager graph execution")
         if not inp.is_contiguous():
             raise PointwiseLoweringError("non-contiguous inputs fall back to eager graph execution")
@@ -434,6 +434,18 @@ class CompiledRegion:
 
 
 @dataclass
+class CompiledOpStep:
+    target: str
+    input_nodes: list
+    output_node: object
+    compiled_kernel: object
+
+    def run(self, env):
+        args = [env[node.name] for node in self.input_nodes]
+        env[self.output_node.name] = self.compiled_kernel.run(args)
+
+
+@dataclass
 class CompiledGraph:
     placeholders: list
     steps: list
@@ -452,7 +464,7 @@ class CompiledGraph:
             env[node.name] = value
 
         for step in self.steps:
-            if isinstance(step, CompiledRegion):
+            if isinstance(step, (CompiledRegion, CompiledOpStep)):
                 step.run(env)
             else:
                 env[step.name] = _run_call_function_node(step, env)
@@ -460,17 +472,25 @@ class CompiledGraph:
         return _resolve(self.output_value, env)
 
 
-def compile_graph_module(graph_module, example_inputs):
+def compile_graph_module(graph_module, example_inputs, *, allow_requires_grad=False):
     try:
-        return lower_pointwise_graph(graph_module, example_inputs).compile()
+        return lower_pointwise_graph(
+            graph_module,
+            example_inputs,
+            allow_requires_grad=allow_requires_grad,
+        ).compile()
     except PointwiseLoweringError:
-        compiled_graph = _compile_partitioned_graph(graph_module, example_inputs)
+        compiled_graph = _compile_partitioned_graph(
+            graph_module,
+            example_inputs,
+            allow_requires_grad=allow_requires_grad,
+        )
         if compiled_graph is None:
             raise
         return compiled_graph
 
 
-def _compile_partitioned_graph(graph_module, example_inputs):
+def _compile_partitioned_graph(graph_module, example_inputs, *, allow_requires_grad=False):
     graph = graph_module.graph
     placeholders = []
     steps = []
@@ -494,12 +514,26 @@ def _compile_partitioned_graph(graph_module, example_inputs):
             continue
 
         if node.op == "call_function":
-            region = _try_compile_region(graph.nodes, idx, users, env_example)
+            region = _try_compile_region(
+                graph.nodes,
+                idx,
+                users,
+                env_example,
+                allow_requires_grad=allow_requires_grad,
+            )
             if region is not None:
                 compiled_any = True
                 region.run(env_example)
                 steps.append(region)
                 idx = region.end_index + 1
+                continue
+
+            compiled_step = _try_compile_single_op(node, env_example)
+            if compiled_step is not None:
+                compiled_any = True
+                compiled_step.run(env_example)
+                steps.append(compiled_step)
+                idx += 1
                 continue
 
             env_example[node.name] = _run_call_function_node(node, env_example)
@@ -521,7 +555,7 @@ def _compile_partitioned_graph(graph_module, example_inputs):
     return CompiledGraph(placeholders, steps, output_value)
 
 
-def _try_compile_region(nodes, start_index, users, env_example):
+def _try_compile_region(nodes, start_index, users, env_example, *, allow_requires_grad=False):
     start_node = nodes[start_index]
     if start_node.op != "call_function" or _target_name(start_node.target) not in _SUPPORTED_TARGETS:
         return None
@@ -542,7 +576,9 @@ def _try_compile_region(nodes, start_index, users, env_example):
                 region_nodes, env_example
             )
             compiled_kernel = lower_pointwise_graph(
-                region_graph_module, region_inputs
+                region_graph_module,
+                region_inputs,
+                allow_requires_grad=allow_requires_grad,
             ).compile()
         except PointwiseLoweringError:
             continue
@@ -556,6 +592,108 @@ def _try_compile_region(nodes, start_index, users, env_example):
         )
 
     return None
+
+
+def _try_compile_single_op(node, env_example):
+    target_name = _target_name(node.target)
+    input_nodes = []
+    seen_inputs = set()
+    input_indices = {}
+
+    def add_input(value):
+        if value in seen_inputs:
+            return input_indices[value]
+        if value.name not in env_example:
+            raise PointwiseLoweringError(
+                f"single-op input is missing example value: {value.name}"
+            )
+        seen_inputs.add(value)
+        input_indices[value] = len(input_nodes)
+        input_nodes.append(value)
+        return input_indices[value]
+
+    def collect_inputs(value):
+        from torch._compile.graph import Node
+
+        if isinstance(value, Node):
+            add_input(value)
+            return
+        if isinstance(value, tuple):
+            for item in value:
+                collect_inputs(item)
+            return
+        if isinstance(value, list):
+            for item in value:
+                collect_inputs(item)
+            return
+        if isinstance(value, dict):
+            for item in value.values():
+                collect_inputs(item)
+
+    def freeze_inputs(value):
+        from torch._compile.graph import Node
+
+        if isinstance(value, Node):
+            return InputRef(add_input(value))
+        if isinstance(value, tuple):
+            return tuple(freeze_inputs(item) for item in value)
+        if isinstance(value, list):
+            return [freeze_inputs(item) for item in value]
+        if isinstance(value, dict):
+            return {key: freeze_inputs(item) for key, item in value.items()}
+        return value
+
+    kernel = None
+
+    if target_name == "mm":
+        if len(node.args) != 2 or node.kwargs:
+            return None
+        collect_inputs(node.args)
+        kernel = MmKernel()
+    elif target_name == "addmm":
+        if len(node.args) != 3 or node.kwargs:
+            return None
+        collect_inputs(node.args)
+        kernel = AddmmKernel()
+    elif target_name == "sum":
+        if len(node.args) != 1:
+            return None
+        collect_inputs(node.args[0])
+        kernel = SumKernel(
+            dim=node.kwargs.get("dim"),
+            keepdim=node.kwargs.get("keepdim", False),
+        )
+    elif target_name == "t":
+        if len(node.args) != 1 or node.kwargs:
+            return None
+        collect_inputs(node.args[0])
+        kernel = TransposeKernel()
+    elif target_name == "view":
+        if not node.args or node.kwargs:
+            return None
+        collect_inputs(node.args[0])
+        kernel = ViewKernel(_normalize_shape_args(node.args))
+    elif target_name == "reshape":
+        if not node.args or node.kwargs:
+            return None
+        collect_inputs(node.args[0])
+        kernel = ReshapeKernel(_normalize_shape_args(node.args))
+    elif target_name in _SUPPORTED_TARGETS or target_name == "gt":
+        kernel = SingleNodeKernel(
+            target=node.target,
+            args_spec=freeze_inputs(node.args),
+            kwargs_spec=freeze_inputs(node.kwargs),
+        )
+
+    if kernel is None:
+        return None
+
+    return CompiledOpStep(
+        target=target_name,
+        input_nodes=input_nodes,
+        output_node=node,
+        compiled_kernel=kernel,
+    )
 
 
 def _build_region_graph_module(region_nodes, env_example):
@@ -645,3 +783,93 @@ def _run_call_function_node(node, env):
     if not isinstance(node.target, str):
         return node.target(*call_args, **call_kwargs)
     raise RuntimeError(f"unsupported compiled target: {node.target}")
+
+
+def _normalize_shape_args(args):
+    if len(args) == 2 and isinstance(args[1], (tuple, list)):
+        return tuple(args[1])
+    return tuple(args[1:])
+
+
+@dataclass(frozen=True)
+class InputRef:
+    index: int
+
+
+@dataclass
+class SingleNodeKernel:
+    target: object
+    args_spec: object
+    kwargs_spec: object
+
+    def run(self, args):
+        call_args = _materialize_input_specs(self.args_spec, args)
+        call_kwargs = _materialize_input_specs(self.kwargs_spec, args)
+        return _run_kernel_target(self.target, call_args, call_kwargs)
+
+
+@dataclass
+class MmKernel:
+    def run(self, args):
+        return args[0].mm(args[1])
+
+
+@dataclass
+class AddmmKernel:
+    def run(self, args):
+        bias, lhs, rhs = args
+        return lhs.mm(rhs) + bias
+
+
+@dataclass
+class SumKernel:
+    dim: object = None
+    keepdim: bool = False
+
+    def run(self, args):
+        return args[0].sum(dim=self.dim, keepdim=self.keepdim)
+
+
+@dataclass
+class TransposeKernel:
+    def run(self, args):
+        return args[0].t()
+
+
+@dataclass
+class ViewKernel:
+    shape: tuple[int, ...]
+
+    def run(self, args):
+        return args[0].view(*self.shape)
+
+
+@dataclass
+class ReshapeKernel:
+    shape: tuple[int, ...]
+
+    def run(self, args):
+        return args[0].reshape(*self.shape)
+
+
+def _materialize_input_specs(value, args):
+    if isinstance(value, InputRef):
+        return args[value.index]
+    if isinstance(value, tuple):
+        return tuple(_materialize_input_specs(item, args) for item in value)
+    if isinstance(value, list):
+        return [_materialize_input_specs(item, args) for item in value]
+    if isinstance(value, dict):
+        return {key: _materialize_input_specs(item, args) for key, item in value.items()}
+    return value
+
+
+def _run_kernel_target(target, call_args, call_kwargs):
+    from torch._compile.graph import _OP_TABLE
+
+    op_fn = _OP_TABLE.get(target)
+    if op_fn is not None:
+        return op_fn(call_args, call_kwargs)
+    if not isinstance(target, str):
+        return target(*call_args, **call_kwargs)
+    raise RuntimeError(f"unsupported compiled target: {target}")

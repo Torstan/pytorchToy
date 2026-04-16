@@ -17,9 +17,13 @@ def _eager_graph_compiler(graph_module, example_inputs):
     return compiled
 
 
-def _inference_graph_compiler(graph_module, example_inputs):
+def _inference_graph_compiler(graph_module, example_inputs, *, allow_requires_grad=False):
     try:
-        compiled_program = compile_graph_module(graph_module, example_inputs)
+        compiled_program = compile_graph_module(
+            graph_module,
+            example_inputs,
+            allow_requires_grad=allow_requires_grad,
+        )
     except PointwiseLoweringError:
         return _eager_graph_compiler(graph_module, example_inputs)
 
@@ -27,6 +31,14 @@ def _inference_graph_compiler(graph_module, example_inputs):
         return compiled_program.run(args)
 
     return compiled
+
+
+def _autograd_graph_compiler(graph_module, example_inputs):
+    return _inference_graph_compiler(
+        graph_module,
+        example_inputs,
+        allow_requires_grad=True,
+    )
 
 
 def _needs_autograd(example_inputs):
@@ -49,8 +61,8 @@ def compile_fx(graph_module, example_inputs):
         return aot_module_simplified(
             decomposed,
             example_inputs,
-            fw_compiler=_eager_graph_compiler,
-            bw_compiler=_eager_graph_compiler,
+            fw_compiler=_autograd_graph_compiler,
+            bw_compiler=_autograd_graph_compiler,
             inference_compiler=_inference_graph_compiler,
         )
 
