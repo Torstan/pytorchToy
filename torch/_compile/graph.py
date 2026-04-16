@@ -182,6 +182,18 @@ def _op_sum(args, kwargs):
     return args[0].sum(**kwargs)
 
 
+@_register_op("gt")
+def _op_gt(args, kwargs):
+    del kwargs
+    return args[0].gt(args[1])
+
+
+@_register_op("t")
+def _op_t(args, kwargs):
+    del kwargs
+    return args[0].t()
+
+
 @_register_op("mm")
 def _op_mm(args, kwargs):
     del kwargs
@@ -260,6 +272,8 @@ _FORMAT_RULES = {
     "mul": lambda node: f"{_format_value(node.args[0])} * {_format_value(node.args[1])}",
     "div": lambda node: f"{_format_value(node.args[0])} / {_format_value(node.args[1])}",
     "neg": lambda node: f"-{_format_value(node.args[0])}",
+    "gt": lambda node: f"{_format_value(node.args[0])}.gt({_format_value(node.args[1])})",
+    "t": lambda node: f"{_format_value(node.args[0])}.t()",
     "mm": lambda node: f"{_format_value(node.args[0])}.mm({_format_value(node.args[1])})",
 }
 
