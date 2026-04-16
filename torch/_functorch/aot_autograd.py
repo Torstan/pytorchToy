@@ -176,6 +176,56 @@ def _zeros_like_graph_value(bw_graph, cache, value):
     return bw_graph.call_function("mul", (primal, 0.0))
 
 
+def _shape_of_node(node):
+    meta = getattr(node, "meta", None) or {}
+    value = meta.get("val")
+    shape = getattr(value, "shape", None)
+    if shape is None:
+        return None
+    return tuple(shape)
+
+
+def _reduce_grad_to_shape(bw_graph, grad_value, source_shape, target_shape):
+    if source_shape is None or target_shape is None or tuple(source_shape) == tuple(target_shape):
+        return grad_value
+
+    source_shape = tuple(source_shape)
+    target_shape = tuple(target_shape)
+    if len(target_shape) > len(source_shape):
+        raise _UnsupportedBackwardGraph(
+            f"cannot reduce grad from shape {source_shape} to larger target {target_shape}"
+        )
+
+    current = grad_value
+    len_diff = len(source_shape) - len(target_shape)
+    padded_target = (1,) * len_diff + target_shape
+
+    for dim in range(len(source_shape) - 1, -1, -1):
+        src_dim = source_shape[dim]
+        tgt_dim = padded_target[dim]
+        if dim < len_diff:
+            current = bw_graph.call_function("sum", (current,), {"dim": dim, "keepdim": False})
+            continue
+        if tgt_dim == 1 and src_dim != 1:
+            current = bw_graph.call_function("sum", (current,), {"dim": dim, "keepdim": True})
+
+    if len_diff > 0 and target_shape:
+        current = bw_graph.call_function("reshape", (current, *target_shape))
+
+    return current
+
+
+def _grad_to_target(bw_graph, grad_value, source_node, target_node):
+    if source_node is None or target_node is None:
+        return grad_value
+    return _reduce_grad_to_shape(
+        bw_graph,
+        grad_value,
+        _shape_of_node(source_node),
+        _shape_of_node(target_node),
+    )
+
+
 def _build_backward_graph(graph_module, example_inputs):
     from torch._compile.graph import Node
     from torch.tensor import Tensor
@@ -256,20 +306,23 @@ def _build_backward_graph(graph_module, example_inputs):
         args = node.args
 
         if target_name == "add":
-            accumulate_grad(args[0], grad_value)
-            accumulate_grad(args[1], grad_value)
+            accumulate_grad(args[0], _grad_to_target(bw_graph, grad_value, node, args[0]))
+            accumulate_grad(args[1], _grad_to_target(bw_graph, grad_value, node, args[1]))
             continue
 
         if target_name == "sub":
-            accumulate_grad(args[0], grad_value)
-            accumulate_grad(args[1], bw_graph.call_function("neg", (grad_value,)))
+            accumulate_grad(args[0], _grad_to_target(bw_graph, grad_value, node, args[0]))
+            rhs_grad = bw_graph.call_function("neg", (grad_value,))
+            accumulate_grad(args[1], _grad_to_target(bw_graph, rhs_grad, node, args[1]))
             continue
 
         if target_name == "mul":
             lhs = _rebuild_forward_value(bw_graph, rebuilt, args[0])
             rhs = _rebuild_forward_value(bw_graph, rebuilt, args[1])
-            accumulate_grad(args[0], bw_graph.call_function("mul", (grad_value, rhs)))
-            accumulate_grad(args[1], bw_graph.call_function("mul", (grad_value, lhs)))
+            lhs_grad = bw_graph.call_function("mul", (grad_value, rhs))
+            rhs_grad = bw_graph.call_function("mul", (grad_value, lhs))
+            accumulate_grad(args[0], _grad_to_target(bw_graph, lhs_grad, node, args[0]))
+            accumulate_grad(args[1], _grad_to_target(bw_graph, rhs_grad, node, args[1]))
             continue
 
         if target_name == "div":
@@ -278,8 +331,10 @@ def _build_backward_graph(graph_module, example_inputs):
             rhs_sq = bw_graph.call_function("mul", (rhs, rhs))
             neg_lhs = bw_graph.call_function("neg", (lhs,))
             rhs_term = bw_graph.call_function("div", (neg_lhs, rhs_sq))
-            accumulate_grad(args[0], bw_graph.call_function("div", (grad_value, rhs)))
-            accumulate_grad(args[1], bw_graph.call_function("mul", (grad_value, rhs_term)))
+            lhs_grad = bw_graph.call_function("div", (grad_value, rhs))
+            rhs_grad = bw_graph.call_function("mul", (grad_value, rhs_term))
+            accumulate_grad(args[0], _grad_to_target(bw_graph, lhs_grad, node, args[0]))
+            accumulate_grad(args[1], _grad_to_target(bw_graph, rhs_grad, node, args[1]))
             continue
 
         if target_name == "neg":
@@ -292,6 +347,12 @@ def _build_backward_graph(graph_module, example_inputs):
             tanh_sq = bw_graph.call_function("mul", (tanh_primal, tanh_primal))
             slope = bw_graph.call_function("sub", (1.0, tanh_sq))
             accumulate_grad(args[0], bw_graph.call_function("mul", (grad_value, slope)))
+            continue
+
+        if target_name == "relu":
+            primal = _rebuild_forward_value(bw_graph, rebuilt, args[0])
+            mask = bw_graph.call_function("gt", (primal, 0.0))
+            accumulate_grad(args[0], bw_graph.call_function("mul", (grad_value, mask)))
             continue
 
         if target_name == "sin":
@@ -307,12 +368,27 @@ def _build_backward_graph(graph_module, example_inputs):
             accumulate_grad(args[0], bw_graph.call_function("mul", (grad_value, neg_sine)))
             continue
 
+        if target_name == "mm":
+            lhs = _rebuild_forward_value(bw_graph, rebuilt, args[0])
+            rhs = _rebuild_forward_value(bw_graph, rebuilt, args[1])
+            rhs_t = bw_graph.call_function("t", (rhs,))
+            lhs_t = bw_graph.call_function("t", (lhs,))
+            lhs_grad = bw_graph.call_function("mm", (grad_value, rhs_t))
+            rhs_grad = bw_graph.call_function("mm", (lhs_t, grad_value))
+            accumulate_grad(args[0], lhs_grad)
+            accumulate_grad(args[1], rhs_grad)
+            continue
+
         if target_name == "sum":
             expanded = bw_graph.call_function(
                 "add",
                 (_zeros_like_graph_value(bw_graph, rebuilt, args[0]), grad_value),
             )
             accumulate_grad(args[0], expanded)
+            continue
+
+        if target_name == "t":
+            accumulate_grad(args[0], bw_graph.call_function("t", (grad_value,)))
             continue
 
         raise _UnsupportedBackwardGraph(f"unsupported backward target: {target_name}")
@@ -423,15 +499,97 @@ def aot_module_simplified(
     bw_compiler=None,
     inference_compiler=None,
 ):
+    from torch.nn.module import Module
+
+    if not isinstance(fn, Module):
+        compiled = aot_function(
+            fn,
+            fw_compiler=fw_compiler,
+            bw_compiler=bw_compiler,
+            inference_compiler=inference_compiler,
+        )
+        compiled(*example_inputs)
+        return compiled
+
+    parameter_names = [name for name, _value in fn.named_parameters()]
+    buffer_names = [name for name, _value in _named_buffers(fn)]
+    lifted_names = parameter_names + buffer_names
+    num_lifted = len(lifted_names)
+
+    def lifted_fn(*flat_args):
+        lifted_values = flat_args[:num_lifted]
+        user_args = flat_args[num_lifted:]
+        restore = []
+        try:
+            for name, value in zip(parameter_names, lifted_values[:len(parameter_names)]):
+                restore.append(_swap_module_tensor(fn, name, value, is_buffer=False))
+            for name, value in zip(buffer_names, lifted_values[len(parameter_names):]):
+                restore.append(_swap_module_tensor(fn, name, value, is_buffer=True))
+            return fn(*user_args)
+        finally:
+            for owner, attr_name, previous, is_buffer in reversed(restore):
+                table = owner._buffers if is_buffer else owner._parameters
+                table[attr_name] = previous
+
     compiled = aot_function(
-        fn,
+        lifted_fn,
         fw_compiler=fw_compiler,
         bw_compiler=bw_compiler,
         inference_compiler=inference_compiler,
     )
-    compiled(*example_inputs)
-    return compiled
+    module_wrapper = _AOTModuleWrapper(fn, compiled, parameter_names, buffer_names)
+    module_wrapper(*example_inputs)
+    return module_wrapper
 
 
 def make_boxed_func(fn):
     return fn
+
+
+def _named_buffers(module, prefix=""):
+    for name, buffer in module._buffers.items():
+        if buffer is not None:
+            full_name = f"{prefix}.{name}" if prefix else name
+            yield full_name, buffer
+    for name, submodule in module._modules.items():
+        if submodule is not None:
+            sub_prefix = f"{prefix}.{name}" if prefix else name
+            yield from _named_buffers(submodule, sub_prefix)
+
+
+def _resolve_module_owner(module, qualified_name):
+    owner = module
+    parts = qualified_name.split(".")
+    for part in parts[:-1]:
+        owner = owner._modules[part]
+    return owner, parts[-1]
+
+
+def _swap_module_tensor(module, qualified_name, value, *, is_buffer):
+    owner, name = _resolve_module_owner(module, qualified_name)
+    table = owner._buffers if is_buffer else owner._parameters
+    previous = table[name]
+    table[name] = value
+    return owner, name, previous, is_buffer
+
+
+class _AOTModuleWrapper:
+    def __init__(self, module, compiled, parameter_names, buffer_names):
+        self._module = module
+        self._compiled = compiled
+        self._parameter_names = list(parameter_names)
+        self._buffer_names = list(buffer_names)
+
+    @property
+    def _last_state(self):
+        return self._compiled._last_state
+
+    def __call__(self, *args, **kwargs):
+        lifted_args = []
+        for name in self._parameter_names:
+            owner, attr_name = _resolve_module_owner(self._module, name)
+            lifted_args.append(owner._parameters[attr_name])
+        for name in self._buffer_names:
+            owner, attr_name = _resolve_module_owner(self._module, name)
+            lifted_args.append(owner._buffers[attr_name])
+        return self._compiled(*lifted_args, *args, **kwargs)

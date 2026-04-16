@@ -12,8 +12,8 @@ def eager_compiler(gm, example_inputs):
     return compiled
 
 
-def fn(x):
-    return torch.relu(torch.tanh(x)).sum()
+def fn(x, w, b):
+    return torch.relu(x.mm(w) + b).sum()
 
 
 compiled = aot_function(
@@ -22,29 +22,36 @@ compiled = aot_function(
     bw_compiler=eager_compiler,
 )
 
-x = torch.tensor([1.0, -2.0])
+x = torch.randn(4, 3)
+w = torch.randn(3, 5)
+b = torch.randn(5)
 x.requires_grad = True
+w.requires_grad = True
+b.requires_grad = True
 
-x_ref = torch.tensor([1.0, -2.0])
+x_ref = x.clone()
+w_ref = w.clone()
+b_ref = b.clone()
 x_ref.requires_grad = True
+w_ref.requires_grad = True
+b_ref.requires_grad = True
 
-ref = fn(x_ref)
+ref = fn(x_ref, w_ref, b_ref)
 ref.backward()
 
-out = compiled(x)
-out.backward()
-
+out = compiled(x, w, b)
 state = compiled._last_state
 assert state is not None
-assert state.graph_module is not None
 assert state.backward_graph_module is not None
-assert state.compiled_fw is not None
-assert state.compiled_bw is not None
 assert state.backward_is_real is True
 
 bw_out = state.compiled_bw(*state.backward_example_inputs)
 assert isinstance(bw_out, tuple)
-assert len(bw_out) == 1
-torch.testing.assert_close(bw_out[0], x_ref.grad)
+assert len(bw_out) == 3
 
-print("aot_autograd_fw_bw_partition: ok")
+torch.testing.assert_close(out, ref)
+torch.testing.assert_close(bw_out[0], x_ref.grad)
+torch.testing.assert_close(bw_out[1], w_ref.grad)
+torch.testing.assert_close(bw_out[2], b_ref.grad)
+
+print("aot_autograd_linear_bias_backward_graph_values: ok")
