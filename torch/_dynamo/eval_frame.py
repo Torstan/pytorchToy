@@ -6,12 +6,22 @@
 内部暂时仍复用现有 proxy tracing 路径。
 """
 
+from dataclasses import dataclass, field
+
 from torch._compile.tracer import Tracer, UnsupportedTraceError
 from torch._logging import get_log_settings
 
 from .backends.registry import lookup_backend
+from . import config
 
 _ACTIVE_WRAPPERS = []
+_CODE_CACHE = {}
+
+
+@dataclass
+class _CodeCacheEntry:
+    compiled_by_signature: dict = field(default_factory=dict)
+    eager_fallback_signatures: set = field(default_factory=set)
 
 
 def _value_signature(value):
@@ -45,6 +55,30 @@ def _call_signature(args, kwargs):
     )
 
 
+def _callable_code_key(fn):
+    code = getattr(fn, "__code__", None)
+    if code is not None:
+        return code
+
+    forward = getattr(fn, "forward", None)
+    if callable(forward):
+        forward_code = getattr(forward, "__code__", None)
+        if forward_code is not None:
+            return (forward_code, id(fn))
+
+    call = getattr(type(fn), "__call__", None)
+    call_code = getattr(call, "__code__", None)
+    if call_code is not None:
+        return (call_code, id(fn))
+
+    return id(fn)
+
+
+def _code_cache_key(fn, backend_name, backend, nopython, dynamic):
+    backend_key = backend_name if isinstance(backend_name, str) else backend
+    return (_callable_code_key(fn), backend_key, bool(nopython), dynamic)
+
+
 class OptimizedFunction:
     """
     最小 Dynamo 包装对象。
@@ -58,15 +92,29 @@ class OptimizedFunction:
         self._backend = lookup_backend(backend)
         self._nopython = nopython
         self._dynamic = dynamic
-        self._cache = {}
+        self._cache_key = _code_cache_key(
+            fn,
+            backend,
+            self._backend,
+            nopython,
+            dynamic,
+        )
         _ACTIVE_WRAPPERS.append(self)
 
     def __call__(self, *args, **kwargs):
         key = _call_signature(args, kwargs)
-        compiled = self._cache.get(key)
-        if compiled is None:
-            compiled = self._compile_for_signature(*args, **kwargs)
-            self._cache[key] = compiled
+        cache_entry = _CODE_CACHE.setdefault(self._cache_key, _CodeCacheEntry())
+        compiled = cache_entry.compiled_by_signature.get(key)
+        if compiled is not None:
+            return compiled(*args, **kwargs)
+        if key in cache_entry.eager_fallback_signatures:
+            return self._original_fn(*args, **kwargs)
+        if len(cache_entry.compiled_by_signature) >= config.recompile_limit:
+            cache_entry.eager_fallback_signatures.add(key)
+            return self._original_fn(*args, **kwargs)
+
+        compiled = self._compile_for_signature(*args, **kwargs)
+        cache_entry.compiled_by_signature[key] = compiled
         return compiled(*args, **kwargs)
 
     def _compile_for_signature(self, *args, **kwargs):
@@ -89,7 +137,7 @@ class OptimizedFunction:
             print("==================")
 
     def reset(self):
-        self._cache.clear()
+        _CODE_CACHE.pop(self._cache_key, None)
 
 
 class OptimizeContext:
@@ -137,5 +185,6 @@ def disable(fn=None, *, reason=None):
 
 
 def reset():
+    _CODE_CACHE.clear()
     for wrapper in list(_ACTIVE_WRAPPERS):
         wrapper.reset()

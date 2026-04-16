@@ -196,11 +196,14 @@ def _interpret(graph, args):
             call_args = tuple(_resolve(a, env) for a in node.args)
             call_kwargs = {k: _resolve(v, env) for k, v in node.kwargs.items()}
             op_fn = _OP_TABLE.get(node.target)
-            if op_fn is None and not isinstance(node.target, str):
-                op_fn = node.target
+            if op_fn is not None:
+                env[node.name] = op_fn(call_args, call_kwargs)
+                continue
+            if not isinstance(node.target, str):
+                env[node.name] = node.target(*call_args, **call_kwargs)
+                continue
             if op_fn is None:
                 raise RuntimeError(f"unsupported compiled target: {node.target}")
-            env[node.name] = op_fn(call_args, call_kwargs)
         elif node.op == "output":
             return _resolve(node.args[0], env)
     return None

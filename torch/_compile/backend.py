@@ -2,16 +2,7 @@
 Backend 编译器 -- 将 GraphModule 编译为可执行 callable
 
 对应 PyTorch: torch._dynamo.backends.registry + torch._inductor.compile_fx
-
-在教学实现中提供两个 backend:
-  - eager_backend: 直接解释执行 GraphModule (无优化，但完整保留 compile 流水线)
-  - fuse_backend: 简单的算子融合 (将连续逐元素操作合并)
 """
-
-from torch._compile.pointwise import (
-    PointwiseLoweringError,
-    compile_graph_module,
-)
 
 
 # ---- Backend Registry ----
@@ -62,22 +53,11 @@ def eager_backend(graph_module, example_inputs):
 @register_backend("inductor")
 def inductor_backend(graph_module, example_inputs):
     """
-    Inductor backend: 优先走 pointwise fused fast path
-
-    先尝试整图 pointwise 编译；失败后再尝试图内局部 pointwise
-    region 的混合执行。仍然无法覆盖时回退到 GraphModule 解释执行，
-    保留完整语义。
+    Inductor backend: 走 mini torch._inductor.compile_fx 总控。
     """
-    try:
-        compiled_program = compile_graph_module(graph_module, example_inputs)
-    except PointwiseLoweringError:
-        def compiled_fn(*args):
-            return graph_module(*args)
-        return compiled_fn
+    from torch._inductor.compile_fx import compile_fx
 
-    def compiled_fn(*args):
-        return compiled_program.run(args)
-    return compiled_fn
+    return compile_fx(graph_module, example_inputs)
 
 
 @register_backend("default")
