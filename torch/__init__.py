@@ -48,3 +48,10 @@ def cos(input_tensor):
     if hasattr(input_tensor, "cos"):
         return input_tensor.cos()
     raise TypeError(f"torch.cos expected Tensor-like input, got {type(input_tensor)}")
+
+
+def tanh(input_tensor):
+    """torch.tanh -- 逐元素双曲正切函数"""
+    if hasattr(input_tensor, "tanh"):
+        return input_tensor.tanh()
+    raise TypeError(f"torch.tanh expected Tensor-like input, got {type(input_tensor)}")

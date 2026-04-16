@@ -302,6 +302,14 @@ def _format_cpp_float(value):
     return f"{text}f"
 
 
+def _target_name(target):
+    if isinstance(target, str):
+        return target
+    if hasattr(target, "__name__"):
+        return target.__name__
+    return repr(target)
+
+
 def lower_pointwise_graph(graph_module, example_inputs):
     from torch._compile.graph import Node
     from torch.tensor import Tensor, float32
@@ -360,12 +368,13 @@ def lower_pointwise_graph(graph_module, example_inputs):
             continue
 
         if node.op == "call_function":
-            if node.target not in _SUPPORTED_TARGETS:
+            target_name = _target_name(node.target)
+            if target_name not in _SUPPORTED_TARGETS:
                 raise PointwiseLoweringError(f"unsupported pointwise target: {node.target}")
             if node.kwargs:
                 raise PointwiseLoweringError(f"kwargs are not supported in pointwise fast path: {node.target}")
 
-            if node.target in _UNARY_TARGETS:
+            if target_name in _UNARY_TARGETS:
                 if len(node.args) != 1:
                     raise PointwiseLoweringError(f"invalid unary node arity for {node.target}")
                 lhs = resolve_ref(node.args[0])
@@ -377,7 +386,7 @@ def lower_pointwise_graph(graph_module, example_inputs):
                 rhs = resolve_ref(node.args[1])
 
             env[node] = ValueRef("temp", num_temps)
-            instructions.append(Instruction(node.target, num_temps, lhs, rhs))
+            instructions.append(Instruction(target_name, num_temps, lhs, rhs))
             num_temps += 1
             continue
 
@@ -514,13 +523,13 @@ def _compile_partitioned_graph(graph_module, example_inputs):
 
 def _try_compile_region(nodes, start_index, users, env_example):
     start_node = nodes[start_index]
-    if start_node.op != "call_function" or start_node.target not in _SUPPORTED_TARGETS:
+    if start_node.op != "call_function" or _target_name(start_node.target) not in _SUPPORTED_TARGETS:
         return None
 
     max_end_index = start_index
     while max_end_index + 1 < len(nodes):
         next_node = nodes[max_end_index + 1]
-        if next_node.op != "call_function" or next_node.target not in _SUPPORTED_TARGETS:
+        if next_node.op != "call_function" or _target_name(next_node.target) not in _SUPPORTED_TARGETS:
             break
         max_end_index += 1
 
@@ -631,6 +640,8 @@ def _run_call_function_node(node, env):
     call_args = tuple(_resolve(arg, env) for arg in node.args)
     call_kwargs = {key: _resolve(value, env) for key, value in node.kwargs.items()}
     op_fn = _OP_TABLE.get(node.target)
-    if op_fn is None:
-        raise RuntimeError(f"unsupported compiled target: {node.target}")
-    return op_fn(call_args, call_kwargs)
+    if op_fn is not None:
+        return op_fn(call_args, call_kwargs)
+    if not isinstance(node.target, str):
+        return node.target(*call_args, **call_kwargs)
+    raise RuntimeError(f"unsupported compiled target: {node.target}")
