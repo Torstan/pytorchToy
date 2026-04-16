@@ -39,6 +39,11 @@ def lookup_backend(backend):
     raise TypeError(f"backend must be str or callable, got {type(backend)}")
 
 
+def list_backends():
+    """返回当前已注册 backend 名称。"""
+    return sorted(_BACKENDS.keys())
+
+
 # ---- 内置 Backends ----
 
 @register_backend("eager")

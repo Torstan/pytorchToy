@@ -135,18 +135,16 @@ def compile(model=None, *, fullgraph=False, dynamic=None, backend="default",
         options: 后端选项 (简化实现中未使用)
         disable: 是否禁用编译 (True 时返回原函数)
     """
-    if disable:
-        if model is not None:
-            return model
-        return lambda fn: fn
+    import torch
 
-    # @torch.compile (无括号装饰器 -- model 就是被装饰的函数)
+    decorator = torch._dynamo.optimize(
+        backend=backend,
+        nopython=fullgraph,
+        dynamic=dynamic,
+        disable=disable,
+    )
+
     if model is not None and callable(model):
-        return OptimizedFunction(model, backend=backend, fullgraph=fullgraph,
-                                 dynamic=dynamic)
+        return decorator(model)
 
-    # @torch.compile(...) (带参数装饰器 -- 返回装饰器工厂)
-    def decorator(fn):
-        return OptimizedFunction(fn, backend=backend, fullgraph=fullgraph,
-                                 dynamic=dynamic)
     return decorator

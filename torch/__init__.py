@@ -14,6 +14,7 @@ import torch.nn
 import torch.optim
 from torch.autograd_engine import no_grad
 from torch._compile import compile
+import torch._dynamo
 import torch._logging
 import torch.testing
 
