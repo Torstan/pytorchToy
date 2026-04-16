@@ -1,7 +1,14 @@
 import torch
 
 from torch._compile.graph import Node
-from torch._compile.pointwise import CompiledGraph, CompiledOpStep, compile_graph_module
+from torch._compile.pointwise import (
+    CompiledGraph,
+    CompiledOpStep,
+    CompiledRegion,
+    GtKernel,
+    SingleNodeKernel,
+    compile_graph_module,
+)
 from torch._compile.tracer import Tracer
 from torch._functorch.aot_autograd import aot_function
 
@@ -34,6 +41,14 @@ assert any(
 ), compiled_fw.steps
 assert any(
     isinstance(step, CompiledOpStep) and step.target == "sum"
+    for step in compiled_fw.steps
+), compiled_fw.steps
+assert not any(
+    isinstance(getattr(step, "compiled_kernel", None), SingleNodeKernel)
+    for step in compiled_fw.steps
+), compiled_fw.steps
+assert any(
+    isinstance(step, CompiledRegion) and len(step.input_nodes) == 2
     for step in compiled_fw.steps
 ), compiled_fw.steps
 torch.testing.assert_close(compiled_fw.run((x, w, b)), fn(x, w, b))
@@ -79,6 +94,18 @@ assert any(
 ), compiled_bw.steps
 assert any(
     isinstance(step, CompiledOpStep) and step.target == "mm"
+    for step in compiled_bw.steps
+), compiled_bw.steps
+assert not any(
+    isinstance(getattr(step, "compiled_kernel", None), SingleNodeKernel)
+    for step in compiled_bw.steps
+), compiled_bw.steps
+assert any(
+    isinstance(step, CompiledRegion) and len(step.input_nodes) == 2
+    for step in compiled_bw.steps
+), compiled_bw.steps
+assert any(
+    isinstance(getattr(step, "compiled_kernel", None), GtKernel)
     for step in compiled_bw.steps
 ), compiled_bw.steps
 

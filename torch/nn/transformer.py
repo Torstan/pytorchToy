@@ -35,8 +35,9 @@ class LayerNorm(Module):
         self.bias = Parameter(Tensor(b))
 
     def forward(self, input):
-        return Tensor(_C.autograd_layer_norm(
-            input._c, self.weight._c, self.bias._c, self.eps))
+        import torch.nn.functional as F
+
+        return F.layer_norm(input, self.weight, self.bias, eps=self.eps)
 
     def __repr__(self):
         return f"LayerNorm({self.normalized_shape}, eps={self.eps})"

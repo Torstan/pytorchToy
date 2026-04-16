@@ -18,3 +18,9 @@ def linear(x, weight, bias=None):
     if bias is None:
         return out
     return prims.add(out, bias)
+
+
+def layer_norm(x, weight, bias=None, eps=1e-5):
+    import torch.nn.functional as F
+
+    return F.layer_norm(x, weight, bias, eps=eps)
