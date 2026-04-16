@@ -91,9 +91,9 @@ def _sum_meta(args, kwargs):
 def _view_meta(args, kwargs):
     del kwargs
     tensor = args[0]
-    shape = args[1]
-    if isinstance(shape, int):
-        shape = (shape,)
+    shape = args[1:]
+    if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
+        shape = tuple(shape[0])
     return FakeTensor(tuple(shape), dtype=tensor.dtype, requires_grad=tensor.requires_grad)
 
 

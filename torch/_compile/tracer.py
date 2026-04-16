@@ -103,6 +103,15 @@ class Proxy:
         return self.tracer.create_proxy("sum", (self,),
                                         {"dim": dim, "keepdim": keepdim})
 
+    def mm(self, other):
+        return self.tracer.create_proxy("mm", (self, other))
+
+    def view(self, *shape):
+        return self.tracer.create_proxy("view", (self, *shape))
+
+    def reshape(self, *shape):
+        return self.tracer.create_proxy("reshape", (self, *shape))
+
     # ---- 算术运算符 ----
 
     def __add__(self, other):

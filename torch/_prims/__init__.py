@@ -43,12 +43,16 @@ def sum(x, dim=None, keepdim=False):
     return x.sum(dim=dim, keepdim=keepdim)
 
 
-def view(x, shape):
-    return x.view(shape)
+def view(x, *shape):
+    if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
+        shape = tuple(shape[0])
+    return x.view(*shape)
 
 
-def reshape(x, shape):
-    return x.reshape(shape)
+def reshape(x, *shape):
+    if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
+        shape = tuple(shape[0])
+    return x.reshape(*shape)
 
 
 def mm(x, y):
