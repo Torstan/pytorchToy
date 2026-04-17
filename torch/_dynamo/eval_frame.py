@@ -13,76 +13,37 @@ from torch._logging import get_log_settings
 
 from .backends.registry import lookup_backend
 from . import config
-from .guards import callable_guard_signature, describe_callable_guards
+from .guards import GuardManager, build_guard_manager
+from .resume_execution import build_resume_plan
 
 _ACTIVE_WRAPPERS = []
 _CODE_CACHE = {}
 
 
 @dataclass
+class GuardedCode:
+    guard_manager: GuardManager
+    compiled: object
+
+
+@dataclass
 class _CodeCacheEntry:
-    compiled_by_signature: dict = field(default_factory=dict)
-    eager_fallback_signatures: set = field(default_factory=set)
+    compiled_variants: list[GuardedCode] = field(default_factory=list)
+    eager_fallback_variants: list[GuardManager] = field(default_factory=list)
 
 
-def _value_signature(value):
-    from torch.tensor import Tensor
-
-    if isinstance(value, Tensor):
-        dtype = getattr(getattr(value, "_dtype", None), "name", repr(getattr(value, "_dtype", None)))
-        return (
-            "tensor",
-            tuple(value.shape),
-            dtype,
-            value.requires_grad,
-            value.is_contiguous(),
-        )
-    if isinstance(value, (int, float, str, bool, type(None))):
-        return (type(value).__name__, value)
-    if isinstance(value, tuple):
-        return ("tuple", tuple(_value_signature(item) for item in value))
-    if isinstance(value, list):
-        return ("list", tuple(_value_signature(item) for item in value))
-    if isinstance(value, dict):
-        items = tuple((key, _value_signature(item)) for key, item in sorted(value.items()))
-        return ("dict", items)
-    return (type(value).__name__, id(value))
+def _find_compiled_variant(cache_entry, args, kwargs, fn):
+    for variant in cache_entry.compiled_variants:
+        if variant.guard_manager.matches(args, kwargs, fn):
+            return variant
+    return None
 
 
-def _call_signature(args, kwargs):
-    return (
-        tuple(_value_signature(arg) for arg in args),
-        tuple((key, _value_signature(value)) for key, value in sorted(kwargs.items())),
-    )
-
-
-def _describe_value(value):
-    from torch.tensor import Tensor
-
-    if isinstance(value, Tensor):
-        dtype = getattr(getattr(value, "_dtype", None), "name", repr(getattr(value, "_dtype", None)))
-        return (
-            f"tensor shape={tuple(value.shape)} dtype={dtype} "
-            f"requires_grad={value.requires_grad} contiguous={value.is_contiguous()}"
-        )
-    if isinstance(value, (int, float, str, bool, type(None))):
-        return f"{type(value).__name__} value={value!r}"
-    if isinstance(value, tuple):
-        return f"tuple len={len(value)}"
-    if isinstance(value, list):
-        return f"list len={len(value)}"
-    if isinstance(value, dict):
-        return f"dict keys={sorted(value.keys())}"
-    return type(value).__name__
-
-
-def _log_value_descriptions(args, kwargs):
-    lines = []
-    for index, value in enumerate(args):
-        lines.append(f"arg{index}: {_describe_value(value)}")
-    for key, value in sorted(kwargs.items()):
-        lines.append(f"kwarg[{key!r}]: {_describe_value(value)}")
-    return lines
+def _has_eager_fallback(cache_entry, args, kwargs, fn):
+    for guard_manager in cache_entry.eager_fallback_variants:
+        if guard_manager.matches(args, kwargs, fn):
+            return True
+    return False
 
 
 def _callable_code_key(fn):
@@ -94,6 +55,8 @@ def _callable_code_key(fn):
     if callable(forward):
         forward_code = getattr(forward, "__code__", None)
         if forward_code is not None:
+            if hasattr(fn, "__dict__") and "_modules" in fn.__dict__:
+                return forward_code
             return (forward_code, id(fn))
 
     call = getattr(type(fn), "__call__", None)
@@ -113,7 +76,8 @@ class OptimizedFunction:
     """
     最小 Dynamo 包装对象。
 
-    当前仍然按调用签名缓存，但公共入口已经切换到 torch._dynamo.optimize。
+    当前基于显式 guard manager 复用 compiled variants，
+    但公共入口已经切换到 torch._dynamo.optimize。
     """
 
     def __init__(self, fn, backend="inductor", *, nopython=False, dynamic=None):
@@ -132,26 +96,28 @@ class OptimizedFunction:
         _ACTIVE_WRAPPERS.append(self)
 
     def __call__(self, *args, **kwargs):
-        key = (
-            _call_signature(args, kwargs),
-            callable_guard_signature(self._original_fn),
-        )
+        guard_manager = build_guard_manager(self._original_fn, args, kwargs)
         cache_entry = _CODE_CACHE.setdefault(self._cache_key, _CodeCacheEntry())
-        compiled = cache_entry.compiled_by_signature.get(key)
-        if compiled is not None:
-            return compiled(*args, **kwargs)
-        if key in cache_entry.eager_fallback_signatures:
+        variant = _find_compiled_variant(cache_entry, args, kwargs, self._original_fn)
+        if variant is not None:
+            return variant.compiled(*args, **kwargs)
+        if _has_eager_fallback(cache_entry, args, kwargs, self._original_fn):
             return self._original_fn(*args, **kwargs)
-        if len(cache_entry.compiled_by_signature) >= config.recompile_limit:
-            self._log_recompile(args, kwargs, cached_variants=len(cache_entry.compiled_by_signature))
-            cache_entry.eager_fallback_signatures.add(key)
+        if len(cache_entry.compiled_variants) >= config.recompile_limit:
+            self._log_recompile(guard_manager, cached_variants=len(cache_entry.compiled_variants))
+            cache_entry.eager_fallback_variants.append(guard_manager)
             return self._original_fn(*args, **kwargs)
 
-        if cache_entry.compiled_by_signature:
-            self._log_recompile(args, kwargs, cached_variants=len(cache_entry.compiled_by_signature))
+        if cache_entry.compiled_variants:
+            self._log_recompile(guard_manager, cached_variants=len(cache_entry.compiled_variants))
 
         compiled = self._compile_for_signature(*args, **kwargs)
-        cache_entry.compiled_by_signature[key] = compiled
+        cache_entry.compiled_variants.append(
+            GuardedCode(
+                guard_manager=guard_manager,
+                compiled=compiled,
+            )
+        )
         return compiled(*args, **kwargs)
 
     def _compile_for_signature(self, *args, **kwargs):
@@ -161,9 +127,17 @@ class OptimizedFunction:
         except UnsupportedTraceError:
             if self._nopython:
                 raise
+            resume_plan = build_resume_plan(
+                self._original_fn,
+                self._backend,
+                args,
+                kwargs,
+            )
+            if resume_plan is not None:
+                return resume_plan
             return self._original_fn
 
-        self._log_guards(args, kwargs)
+        self._log_guards(build_guard_manager(self._original_fn, args, kwargs))
         self._log_graph(graph_module)
         return self._backend(graph_module, list(args))
 
@@ -174,24 +148,22 @@ class OptimizedFunction:
             graph_module.print_readable()
             print("==================")
 
-    def _log_guards(self, args, kwargs):
+    def _log_guards(self, guard_manager):
         settings = get_log_settings()
         if not settings.get("guards", False):
             return
         print("=== GUARDS ===")
-        for line in _log_value_descriptions(args, kwargs):
-            print(line)
-        for line in describe_callable_guards(self._original_fn):
+        for line in guard_manager.describe():
             print(line)
         print("==============")
 
-    def _log_recompile(self, args, kwargs, *, cached_variants):
+    def _log_recompile(self, guard_manager, *, cached_variants):
         settings = get_log_settings()
         if not settings.get("recompiles", False):
             return
         print("=== RECOMPILE ===")
         print(f"cached_variants={cached_variants}")
-        for line in _log_value_descriptions(args, kwargs):
+        for line in guard_manager.describe():
             print(line)
         print("=================")
 

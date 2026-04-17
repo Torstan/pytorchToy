@@ -1,4 +1,6 @@
 import torch
+import torch._dynamo.eval_frame as eval_frame
+from torch._dynamo.guards import GuardManager
 
 
 compiled = {"count": 0}
@@ -32,6 +34,13 @@ try:
 
     torch.testing.assert_close(opt(x2), demo(x2))
     assert compiled["count"] == 1, "expected eager fallback after hitting recompile limit"
+
+    assert len(eval_frame._CODE_CACHE) == 1
+    entry = next(iter(eval_frame._CODE_CACHE.values()))
+    assert len(entry.compiled_variants) == 1
+    assert len(entry.eager_fallback_variants) == 1
+    assert isinstance(entry.compiled_variants[0].guard_manager, GuardManager)
+    assert isinstance(entry.eager_fallback_variants[0], GuardManager)
 finally:
     torch._dynamo.config.recompile_limit = prior_limit
     torch._dynamo.reset()
