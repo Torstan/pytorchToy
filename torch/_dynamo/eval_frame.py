@@ -14,6 +14,7 @@ from torch._logging import get_log_settings
 
 from .backends.registry import lookup_backend
 from . import config
+from .convert_frame import convert_frame
 from .guards import GuardManager, build_guard_manager
 from .resume_execution import build_resume_plan
 
@@ -192,27 +193,30 @@ class OptimizedFunction:
 
     def _compile_for_signature(self, *args, **kwargs):
         flat_args, signature = _flatten_runtime_inputs(self._original_fn, args, kwargs)
-        trace_fn = self._original_fn
-        if signature is not None:
-            def trace_fn(*runtime_args):
-                call_args, call_kwargs = _rebuild_runtime_call(signature, runtime_args)
-                return self._original_fn(*call_args, **call_kwargs)
-
-        tracer = Tracer()
         try:
-            graph_module = tracer.trace(trace_fn, flat_args)
+            graph_module = convert_frame(self._original_fn, flat_args)
         except UnsupportedTraceError:
-            if self._nopython:
-                raise
-            resume_plan = build_resume_plan(
-                self._original_fn,
-                self._backend,
-                args,
-                kwargs,
-            )
-            if resume_plan is not None:
-                return resume_plan
-            return self._original_fn
+            trace_fn = self._original_fn
+            if signature is not None:
+                def trace_fn(*runtime_args):
+                    call_args, call_kwargs = _rebuild_runtime_call(signature, runtime_args)
+                    return self._original_fn(*call_args, **call_kwargs)
+
+            tracer = Tracer()
+            try:
+                graph_module = tracer.trace(trace_fn, flat_args)
+            except (UnsupportedTraceError, TypeError):
+                if self._nopython:
+                    raise
+                resume_plan = build_resume_plan(
+                    self._original_fn,
+                    self._backend,
+                    args,
+                    kwargs,
+                )
+                if resume_plan is not None:
+                    return resume_plan
+                return self._original_fn
 
         self._log_guards(build_guard_manager(self._original_fn, args, kwargs))
         self._log_graph(graph_module)
