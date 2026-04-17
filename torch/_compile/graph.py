@@ -252,8 +252,7 @@ def _interpret(graph, args):
             if not isinstance(node.target, str):
                 env[node.name] = node.target(*call_args, **call_kwargs)
                 continue
-            if op_fn is None:
-                raise RuntimeError(f"unsupported compiled target: {node.target}")
+            raise RuntimeError(f"unsupported compiled target: {node.target}")
         elif node.op == "output":
             return _resolve(node.args[0], env)
     return None

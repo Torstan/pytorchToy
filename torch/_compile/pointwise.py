@@ -365,14 +365,6 @@ def _prepare_pointwise_runtime_args(args, output_shape, *, allow_requires_grad, 
     return prepared_args
 
 
-def _target_name(target):
-    if isinstance(target, str):
-        return target
-    if hasattr(target, "__name__"):
-        return target.__name__
-    return repr(target)
-
-
 def _broadcast_shapes(lhs_shape, rhs_shape):
     lhs = list(lhs_shape)
     rhs = list(rhs_shape)
@@ -394,7 +386,7 @@ def _broadcast_shapes(lhs_shape, rhs_shape):
 
 
 def lower_pointwise_graph(graph_module, example_inputs, *, allow_requires_grad=False):
-    from torch._compile.graph import Node
+    from torch._compile.graph import Node, _target_name
     from torch.tensor import Tensor, float32
 
     if not example_inputs:
@@ -639,6 +631,8 @@ def _compile_partitioned_graph(graph_module, example_inputs, *, allow_requires_g
 
 
 def _try_compile_region(nodes, start_index, users, env_example, *, allow_requires_grad=False):
+    from torch._compile.graph import _target_name
+
     start_node = nodes[start_index]
     if start_node.op != "call_function" or _target_name(start_node.target) not in _SUPPORTED_TARGETS:
         return None
@@ -678,6 +672,8 @@ def _try_compile_region(nodes, start_index, users, env_example, *, allow_require
 
 
 def _try_compile_single_op(node, env_example):
+    from torch._compile.graph import _normalize_shape_args, _target_name
+
     target_name = _target_name(node.target)
     input_nodes = []
     seen_inputs = set()
@@ -694,24 +690,6 @@ def _try_compile_single_op(node, env_example):
         input_indices[value] = len(input_nodes)
         input_nodes.append(value)
         return input_indices[value]
-
-    def collect_inputs(value):
-        from torch._compile.graph import Node
-
-        if isinstance(value, Node):
-            add_input(value)
-            return
-        if isinstance(value, tuple):
-            for item in value:
-                collect_inputs(item)
-            return
-        if isinstance(value, list):
-            for item in value:
-                collect_inputs(item)
-            return
-        if isinstance(value, dict):
-            for item in value.values():
-                collect_inputs(item)
 
     def freeze_inputs(value):
         from torch._compile.graph import Node
@@ -788,7 +766,6 @@ def _try_compile_single_op(node, env_example):
             target=target_name,
             arg_spec=freeze_inputs(node.args[0]),
         )
-        collect_inputs(node.args[0])
     elif target_name in _BINARY_TARGETS:
         if len(node.args) != 2 or node.kwargs:
             return None
@@ -797,8 +774,6 @@ def _try_compile_single_op(node, env_example):
             lhs_spec=freeze_inputs(node.args[0]),
             rhs_spec=freeze_inputs(node.args[1]),
         )
-        collect_inputs(node.args[0])
-        collect_inputs(node.args[1])
     elif target_name == "gt":
         if len(node.args) != 2 or node.kwargs:
             return None
@@ -806,8 +781,6 @@ def _try_compile_single_op(node, env_example):
             lhs_spec=freeze_inputs(node.args[0]),
             rhs_spec=freeze_inputs(node.args[1]),
         )
-        collect_inputs(node.args[0])
-        collect_inputs(node.args[1])
 
     if kernel is None:
         return None
@@ -907,12 +880,6 @@ def _run_call_function_node(node, env):
     if not isinstance(node.target, str):
         return node.target(*call_args, **call_kwargs)
     raise RuntimeError(f"unsupported compiled target: {node.target}")
-
-
-def _normalize_shape_args(args):
-    if len(args) == 2 and isinstance(args[1], (tuple, list)):
-        return tuple(args[1])
-    return tuple(args[1:])
 
 
 @dataclass(frozen=True)
