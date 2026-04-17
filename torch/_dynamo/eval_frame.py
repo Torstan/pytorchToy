@@ -6,6 +6,7 @@
 内部暂时仍复用现有 proxy tracing 路径。
 """
 
+import inspect
 from dataclasses import dataclass, field
 
 from torch._compile.tracer import Tracer, UnsupportedTraceError
@@ -72,6 +73,75 @@ def _code_cache_key(fn, backend_name, backend, nopython, dynamic):
     return (_callable_code_key(fn), backend_key, bool(nopython), dynamic)
 
 
+def _callable_signature(fn):
+    forward = getattr(fn, "forward", None)
+    if callable(forward) and hasattr(fn, "__dict__") and "_modules" in fn.__dict__:
+        try:
+            return inspect.signature(forward)
+        except (TypeError, ValueError):
+            return None
+
+    try:
+        return inspect.signature(fn)
+    except (TypeError, ValueError):
+        return None
+
+
+def _flatten_runtime_inputs(fn, args, kwargs, *, signature=None):
+    if not kwargs:
+        return tuple(args), None
+
+    signature = signature or _callable_signature(fn)
+    if signature is None:
+        raise NotImplementedError("torch.compile kwargs are not supported for this callable")
+
+    unsupported = (
+        inspect.Parameter.VAR_POSITIONAL,
+        inspect.Parameter.VAR_KEYWORD,
+    )
+    if any(param.kind in unsupported for param in signature.parameters.values()):
+        raise NotImplementedError("torch.compile kwargs are not supported for varargs callables")
+
+    bound = signature.bind(*args, **kwargs)
+    bound.apply_defaults()
+    flat_args = tuple(
+        bound.arguments[name]
+        for name in signature.parameters
+        if name in bound.arguments
+    )
+    return flat_args, signature
+
+
+def _rebuild_runtime_call(signature, flat_args):
+    call_args = []
+    call_kwargs = {}
+    for (name, param), value in zip(signature.parameters.items(), flat_args):
+        if param.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            call_args.append(value)
+            continue
+        if param.kind == inspect.Parameter.KEYWORD_ONLY:
+            call_kwargs[name] = value
+            continue
+        raise NotImplementedError("torch.compile kwargs are not supported for varargs callables")
+    return tuple(call_args), call_kwargs
+
+
+def _wrap_compiled_with_runtime_binding(fn, compiled, signature):
+    def compiled_with_binding(*args, **kwargs):
+        flat_args, _ = _flatten_runtime_inputs(
+            fn,
+            args,
+            kwargs,
+            signature=signature,
+        )
+        return compiled(*flat_args)
+
+    return compiled_with_binding
+
+
 class OptimizedFunction:
     """
     最小 Dynamo 包装对象。
@@ -121,9 +191,16 @@ class OptimizedFunction:
         return compiled(*args, **kwargs)
 
     def _compile_for_signature(self, *args, **kwargs):
+        flat_args, signature = _flatten_runtime_inputs(self._original_fn, args, kwargs)
+        trace_fn = self._original_fn
+        if signature is not None:
+            def trace_fn(*runtime_args):
+                call_args, call_kwargs = _rebuild_runtime_call(signature, runtime_args)
+                return self._original_fn(*call_args, **call_kwargs)
+
         tracer = Tracer()
         try:
-            graph_module = tracer.trace(self._original_fn, args)
+            graph_module = tracer.trace(trace_fn, flat_args)
         except UnsupportedTraceError:
             if self._nopython:
                 raise
@@ -139,7 +216,10 @@ class OptimizedFunction:
 
         self._log_guards(build_guard_manager(self._original_fn, args, kwargs))
         self._log_graph(graph_module)
-        return self._backend(graph_module, list(args))
+        compiled = self._backend(graph_module, list(flat_args))
+        if signature is None:
+            return compiled
+        return _wrap_compiled_with_runtime_binding(self._original_fn, compiled, signature)
 
     def _log_graph(self, graph_module):
         settings = get_log_settings()
