@@ -2,17 +2,10 @@ import torch
 
 from torch._functorch.aot_autograd import aot_function
 
+from test_utils import eager_compiler
+
 
 counts = {"bw_compile": 0, "bw_run": 0}
-
-
-def eager_compiler(gm, example_inputs):
-    del example_inputs
-
-    def compiled(*args):
-        return gm(*args)
-
-    return compiled
 
 
 def counting_bw_compiler(gm, example_inputs):

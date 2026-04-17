@@ -2,14 +2,7 @@ import torch
 
 from torch._functorch.aot_autograd import aot_module_simplified
 
-
-def eager_compiler(gm, example_inputs):
-    del example_inputs
-
-    def compiled(*args):
-        return gm(*args)
-
-    return compiled
+from test_utils import eager_compiler
 
 
 class ToyModule(torch.nn.Module):
