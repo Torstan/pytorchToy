@@ -2,6 +2,8 @@ import importlib
 
 import torch
 
+from test_utils import make_counting_compile_graph_module
+
 
 compile_fx_mod = importlib.import_module("torch._inductor.compile_fx")
 
@@ -11,21 +13,7 @@ counts = {
     "run": 0,
 }
 
-original_compile_graph_module = compile_fx_mod.compile_graph_module
-
-
-def wrapped_compile_graph_module(gm, example_inputs, **kwargs):
-    compiled = original_compile_graph_module(gm, example_inputs, **kwargs)
-    counts["compile"] += 1
-
-    class WrappedKernel:
-        def run(self, args):
-            counts["run"] += 1
-            return compiled.run(args)
-
-    return WrappedKernel()
-
-
+wrapped_compile_graph_module, original_compile_graph_module = make_counting_compile_graph_module(counts)
 compile_fx_mod.compile_graph_module = wrapped_compile_graph_module
 
 

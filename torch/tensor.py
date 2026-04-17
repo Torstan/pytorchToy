@@ -125,8 +125,8 @@ class Tensor:
         return "cpu"
 
     def stride(self):
-        if not self.is_contiguous():
-            raise RuntimeError("stride() only supports contiguous tensors")
+        if hasattr(self._c, "strides"):
+            return tuple(self._c.strides())
         sizes = list(self.shape)
         if not sizes:
             return ()

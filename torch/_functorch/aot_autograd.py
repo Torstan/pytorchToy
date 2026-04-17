@@ -390,10 +390,20 @@ def _build_backward_graph(graph_module, example_inputs):
             continue
 
         if target_name == "sum":
-            expanded = bw_graph.call_function(
-                "add",
-                (_zeros_like_graph_value(bw_graph, rebuilt, args[0]), grad_value),
-            )
+            dim = node.kwargs.get("dim", None)
+            keepdim = node.kwargs.get("keepdim", False)
+            if dim is not None and not keepdim:
+                # grad_value has the reduced dim removed; reinsert it before expand
+                unsqueezed = bw_graph.call_function("unsqueeze", (grad_value, dim))
+                expanded = bw_graph.call_function(
+                    "add",
+                    (_zeros_like_graph_value(bw_graph, rebuilt, args[0]), unsqueezed),
+                )
+            else:
+                expanded = bw_graph.call_function(
+                    "add",
+                    (_zeros_like_graph_value(bw_graph, rebuilt, args[0]), grad_value),
+                )
             accumulate_grad(args[0], expanded)
             continue
 

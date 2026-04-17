@@ -172,6 +172,9 @@ class Source:
             return kwargs[self.key]
         if self.kind == "global":
             return _callable_globals(fn)[self.key]
+        if self.kind == "global_attr":
+            obj = _callable_globals(fn)[self.path[0]]
+            return getattr(obj, self.key)
         if self.kind == "closure":
             return _closure_values(fn)[self.key]
         if self.kind == "bound_self":
@@ -198,6 +201,8 @@ class Source:
             return f"kwarg[{self.key!r}]"
         if self.kind == "global":
             return f"global[{self.key}]"
+        if self.kind == "global_attr":
+            return f"global_attr[{self.path[0]}.{self.key}]"
         if self.kind == "closure":
             return f"closure[{self.key}]"
         if self.kind == "bound_self":
@@ -273,6 +278,19 @@ def _build_input_guards(args, kwargs):
     return guards
 
 
+def _attr_chains_from_bytecode(code):
+    """Return list of (global_name, attr_name) pairs that appear as LOAD_GLOBAL → LOAD_ATTR sequences."""
+    import dis
+    chains = []
+    instructions = list(dis.get_instructions(code))
+    for i, instr in enumerate(instructions):
+        if instr.opname in ("LOAD_GLOBAL", "LOAD_NAME") and i + 1 < len(instructions):
+            next_instr = instructions[i + 1]
+            if next_instr.opname == "LOAD_ATTR":
+                chains.append((instr.argval, next_instr.argval))
+    return chains
+
+
 def _build_global_guards(fn):
     callable_fn = _callable_python_impl(fn)
     code = getattr(callable_fn, "__code__", None)
@@ -291,6 +309,30 @@ def _build_global_guards(fn):
             Guard(
                 source=Source("global", key=name),
                 expected=signature,
+                kind="captured",
+            )
+        )
+
+    # Guard attribute values that are constant-folded off global objects.
+    seen_attr_guards = set()
+    for global_name, attr_name in _attr_chains_from_bytecode(code):
+        if global_name not in globals_dict:
+            continue
+        obj = globals_dict[global_name]
+        if not hasattr(obj, attr_name):
+            continue
+        attr_value = getattr(obj, attr_name)
+        attr_sig = _captured_value_signature(attr_value)
+        if attr_sig is _SKIP:
+            continue
+        key = (global_name, attr_name)
+        if key in seen_attr_guards:
+            continue
+        seen_attr_guards.add(key)
+        guards.append(
+            Guard(
+                source=Source("global_attr", key=attr_name, path=(global_name,)),
+                expected=attr_sig,
                 kind="captured",
             )
         )

@@ -1,3 +1,4 @@
+import importlib
 import runpy
 from pathlib import Path
 
@@ -14,7 +15,13 @@ TESTS = [
     ROOT / "test" / "compile_python_overhead.py",
 ]
 
+compile_fx_mod = importlib.import_module("torch._inductor.compile_fx")
+_true_compile_fx = compile_fx_mod.compile_fx
+
 for test_file in TESTS:
-    runpy.run_path(str(test_file), run_name="__main__")
+    try:
+        runpy.run_path(str(test_file), run_name="__main__")
+    finally:
+        compile_fx_mod.compile_fx = _true_compile_fx
 
 print("compile_smoke_runner: ok")

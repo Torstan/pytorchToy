@@ -2,21 +2,10 @@ import torch
 
 from torch._functorch.aot_autograd import aot_function
 
+from test_utils import make_compiler
+
 
 seen = {"fw": 0, "bw": 0, "inf": 0}
-
-
-def make_compiler(name):
-    def compiler(gm, example_inputs):
-        del example_inputs
-        seen[name] += 1
-
-        def compiled(*args):
-            return gm(*args)
-
-        return compiled
-
-    return compiler
 
 
 def fn(x, y):
@@ -25,9 +14,9 @@ def fn(x, y):
 
 compiled = aot_function(
     fn,
-    fw_compiler=make_compiler("fw"),
-    bw_compiler=make_compiler("bw"),
-    inference_compiler=make_compiler("inf"),
+    fw_compiler=make_compiler("fw", seen),
+    bw_compiler=make_compiler("bw", seen),
+    inference_compiler=make_compiler("inf", seen),
 )
 
 x = torch.randn(4, 4)
