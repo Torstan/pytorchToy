@@ -520,15 +520,19 @@ class AOTFunction:
 
         if requires_grad:
             differentiable_input_indices = _differentiable_input_indices(args)
-            compiled_fw = self._fw_compiler(graph_module, list(args))
             backward_graph_module, backward_example_inputs, backward_is_real = _build_backward_graph_or_stub(
                 graph_module,
                 list(args),
             )
-            compiled_bw = self._bw_compiler(
-                backward_graph_module,
-                list(backward_example_inputs),
-            )
+            if backward_is_real:
+                compiled_fw = self._fw_compiler(graph_module, list(args))
+                compiled_bw = self._bw_compiler(
+                    backward_graph_module,
+                    list(backward_example_inputs),
+                )
+            else:
+                compiled_fw = self._fn
+                compiled_bw = None
         else:
             compiled_fw = self._inference_compiler(graph_module, list(args))
             backward_graph_module = None

@@ -174,6 +174,10 @@ class Source:
             return _callable_globals(fn)[self.key]
         if self.kind == "closure":
             return _closure_values(fn)[self.key]
+        if self.kind == "bound_self":
+            return fn.__self__
+        if self.kind == "bound_self_attr":
+            return getattr(fn.__self__, self.key)
         if self.kind == "callable_attr":
             return getattr(fn, self.key)
         if self.kind == "module_self":
@@ -196,6 +200,10 @@ class Source:
             return f"global[{self.key}]"
         if self.kind == "closure":
             return f"closure[{self.key}]"
+        if self.kind == "bound_self":
+            return "bound_self_id[self]"
+        if self.kind == "bound_self_attr":
+            return f"bound_self_attr[{self.key}]"
         if self.kind == "callable_attr":
             return f"callable_attr[{self.key}]"
 
@@ -398,12 +406,42 @@ def _build_callable_object_guards(fn):
     return guards
 
 
+def _build_bound_method_guards(fn):
+    method_fn = getattr(fn, "__func__", None)
+    self_obj = getattr(fn, "__self__", None)
+    if method_fn is None or self_obj is None:
+        return []
+    if not hasattr(self_obj, "__dict__"):
+        return []
+
+    guards = [
+        Guard(
+            source=Source("bound_self"),
+            expected=(type(self_obj).__name__, id(self_obj)),
+            kind="captured",
+        )
+    ]
+    for name, value in sorted(self_obj.__dict__.items()):
+        signature = _captured_value_signature(value)
+        if signature is _SKIP:
+            continue
+        guards.append(
+            Guard(
+                source=Source("bound_self_attr", key=name),
+                expected=signature,
+                kind="captured",
+            )
+        )
+    return guards
+
+
 def build_guard_manager(fn, args, kwargs):
     guards = []
     guards.extend(_build_input_guards(args, kwargs))
     guards.extend(_build_global_guards(fn))
     guards.extend(_build_closure_guards(fn))
     guards.extend(_build_module_guards(fn))
+    guards.extend(_build_bound_method_guards(fn))
     guards.extend(_build_callable_object_guards(fn))
     return GuardManager(guards)
 
