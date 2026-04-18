@@ -254,6 +254,12 @@ class OptimizedFunction:
         flat_args, signature = _flatten_runtime_inputs(self._original_fn, args, kwargs)
         graph_input_positions = _graph_input_positions(flat_args)
         graph_example_inputs = _extract_graph_inputs(flat_args, graph_input_positions)
+        if not graph_input_positions:
+            if self._nopython:
+                raise UnsupportedTraceError(
+                    "torch.compile fullgraph path requires at least one top-level Tensor input"
+                )
+            return self._original_fn
         try:
             graph_module = convert_frame(
                 self._original_fn,

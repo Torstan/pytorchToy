@@ -403,6 +403,11 @@ class Tensor:
     def gt(self, value):
         return self._apply_scalar(float(value), lambda a, b: 1.0 if a > b else 0.0)
 
+    def __gt__(self, other):
+        if isinstance(other, Tensor):
+            return self._apply_binary(other, lambda a, b: 1.0 if a > b else 0.0)
+        return self._apply_scalar(float(other), lambda a, b: 1.0 if a > b else 0.0)
+
     def __ne__(self, other):
         if isinstance(other, Tensor):
             return self._apply_binary(other, lambda a, b: 1.0 if a != b else 0.0)
@@ -422,6 +427,11 @@ class Tensor:
             if dim < 0:
                 dim = self.dim() + dim
             return Tensor(_C.autograd_sum_dim(self._c, dim, keepdim))
+
+    def mean(self, dim=None, keepdim=False):
+        if dim is not None:
+            raise RuntimeError("mean(dim=...) is not supported yet")
+        return self.sum() / self.numel()
 
     def any(self):
         n = self.numel()
@@ -504,20 +514,20 @@ def FloatTensor(data):
     raise TypeError(f"FloatTensor: unsupported type {type(data)}")
 
 
-def zeros(*shape):
+def zeros(*shape, requires_grad=False):
     if len(shape) == 1 and isinstance(shape[0], (list, tuple)):
         shape = list(shape[0])
     else:
         shape = list(shape)
-    return Tensor(_C.Tensor(shape, 0.0))
+    return Tensor(_C.Tensor(shape, 0.0), requires_grad=requires_grad)
 
 
-def ones(*shape):
+def ones(*shape, requires_grad=False):
     if len(shape) == 1 and isinstance(shape[0], (list, tuple)):
         shape = list(shape[0])
     else:
         shape = list(shape)
-    return Tensor(_C.ones(shape))
+    return Tensor(_C.ones(shape), requires_grad=requires_grad)
 
 
 _rng_seed = None
@@ -529,7 +539,7 @@ def manual_seed(seed):
     random.seed(seed)
 
 
-def randn(*shape):
+def randn(*shape, requires_grad=False):
     if len(shape) == 1 and isinstance(shape[0], (list, tuple)):
         shape = list(shape[0])
     else:
@@ -551,10 +561,10 @@ def randn(*shape):
         if i + 1 < n:
             result.flat_set(i + 1, z1)
 
-    return Tensor(result)
+    return Tensor(result, requires_grad=requires_grad)
 
 
-def tensor(data, dtype=None):
+def tensor(data, dtype=None, requires_grad=False):
     import numpy as np
 
     if isinstance(data, np.ndarray):
@@ -574,7 +584,7 @@ def tensor(data, dtype=None):
     for i, v in enumerate(flat):
         c.flat_set(i, float(v))
 
-    t = Tensor(c)
+    t = Tensor(c, requires_grad=requires_grad)
     if dtype is not None:
         t._dtype = dtype
     return t
