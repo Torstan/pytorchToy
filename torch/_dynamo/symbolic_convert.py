@@ -40,6 +40,8 @@ _COMPARE_OPS = {
 _TORCH_OPERATOR_NAMES = {
     "sin",
     "cos",
+    "exp",
+    "log",
     "relu",
     "tanh",
     "sum",
@@ -52,6 +54,8 @@ _TORCH_OPERATOR_NAMES = {
 _TENSOR_METHOD_NAMES = {
     "sin",
     "cos",
+    "exp",
+    "log",
     "relu",
     "tanh",
     "sum",
@@ -173,6 +177,21 @@ def _wrap_python_value(value):
     if isinstance(value, (int, float, str, bool, type(None), tuple, list, dict)):
         return ConstantVariable(value)
     return PythonObjectVariable(value)
+
+
+def _is_inlineable_python_callable(fn):
+    if getattr(fn, "__func__", None) is not None and getattr(fn, "__self__", None) is not None:
+        return True
+    if inspect.isfunction(fn):
+        return True
+
+    forward = getattr(type(fn), "forward", None)
+    bound_forward = getattr(fn, "forward", None)
+    if callable(forward) and callable(bound_forward):
+        return getattr(forward, "__code__", None) is not None
+
+    call = getattr(type(fn), "__call__", None)
+    return call is not None and getattr(call, "__code__", None) is not None
 
 
 def _materialize_variable(value):
@@ -334,8 +353,12 @@ class InstructionTranslator:
         if isinstance(callable_var, UserFunctionVariable):
             return self._inline_user_function(callable_var.fn, args)
         if isinstance(callable_var, ConstantVariable) and callable(callable_var.value):
+            if any(_contains_tensor_variable(arg) for arg in args) and _is_inlineable_python_callable(callable_var.value):
+                return self._inline_user_function(callable_var.value, args)
             return self._constant_python_call(callable_var.value, args)
         if isinstance(callable_var, PythonObjectVariable) and callable(callable_var.value):
+            if any(_contains_tensor_variable(arg) for arg in args) and _is_inlineable_python_callable(callable_var.value):
+                return self._inline_user_function(callable_var.value, args)
             return self._constant_python_call(callable_var.value, args)
         raise UnsupportedTraceError(f"unsupported callable during bytecode capture: {type(callable_var)}")
 
@@ -432,6 +455,10 @@ class InstructionTranslator:
             return args[0].sin()
         if target == "cos":
             return args[0].cos()
+        if target == "exp":
+            return args[0].exp()
+        if target == "log":
+            return args[0].log()
         if target == "relu":
             return args[0].relu()
         if target == "tanh":
@@ -461,7 +488,7 @@ class InstructionTranslator:
         raise UnsupportedTraceError(f"unsupported eager bytecode target: {target}")
 
 
-def convert_callable_to_graph(fn, example_inputs):
+def convert_callable_to_graph(fn, example_inputs, *, graph_input_positions=None):
     from torch._compile.graph import Graph
 
     spec = _build_inline_spec(fn)
@@ -469,20 +496,27 @@ def convert_callable_to_graph(fn, example_inputs):
         raise UnsupportedTraceError(
             f"bytecode capture arity mismatch: expected {len(spec.parameter_names)}, got {len(example_inputs)}"
         )
+    if graph_input_positions is None:
+        graph_input_positions = tuple(range(len(example_inputs)))
 
     graph = Graph()
     locals_env = {}
     for name, value in spec.hidden_locals.items():
         locals_env[name] = _wrap_python_value(value)
-    for name, value in zip(spec.parameter_names, example_inputs):
-        node = graph.placeholder(name)
-        if isinstance(value, Tensor):
-            locals_env[name] = TensorVariable(node)
-        else:
-            locals_env[name] = ConstantVariable(value)
+    graph_example_inputs = []
+    graph_input_positions = tuple(graph_input_positions)
+    graph_input_position_set = set(graph_input_positions)
+    for index, (name, value) in enumerate(zip(spec.parameter_names, example_inputs)):
+        if index in graph_input_position_set:
+            node = graph.placeholder(name)
+            graph_example_inputs.append(value)
+            if isinstance(value, Tensor):
+                locals_env[name] = TensorVariable(node)
+                continue
+        locals_env[name] = _wrap_python_value(value)
 
     output = InstructionTranslator(graph, spec, locals_env).run()
     graph.output(_materialize_variable(output))
     graph_module = GraphModule(graph)
-    graph_module.propagate_meta(example_inputs)
+    graph_module.propagate_meta(graph_example_inputs)
     return graph_module

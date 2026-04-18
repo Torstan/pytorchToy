@@ -20,6 +20,8 @@ def select_decomp_table():
     return {
         "sin": prims.sin,
         "cos": prims.cos,
+        "exp": prims.exp,
+        "log": prims.log,
         "relu": refs.relu,
         "tanh": prims.tanh,
         "neg": prims.neg,

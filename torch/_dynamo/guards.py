@@ -48,6 +48,24 @@ def _callable_globals(fn):
 
 
 def input_value_signature(value):
+    return _input_value_signature(value, set())
+
+
+def _object_attr_signature(value, seen):
+    signature = _captured_value_signature(value)
+    if signature is not _SKIP:
+        return signature
+    return _input_value_signature(value, seen)
+
+
+def _callable_closure_signature(value, seen):
+    closure_items = []
+    for name, item in sorted(_closure_values(value).items()):
+        closure_items.append((name, _object_attr_signature(item, seen)))
+    return tuple(closure_items)
+
+
+def _input_value_signature(value, seen):
     if isinstance(value, Tensor):
         dtype = getattr(getattr(value, "_dtype", None), "name", repr(getattr(value, "_dtype", None)))
         return (
@@ -60,13 +78,64 @@ def input_value_signature(value):
     if isinstance(value, (int, float, str, bool, type(None))):
         return (type(value).__name__, value)
     if isinstance(value, tuple):
-        return ("tuple", tuple(input_value_signature(item) for item in value))
+        return ("tuple", tuple(_input_value_signature(item, seen) for item in value))
     if isinstance(value, list):
-        return ("list", tuple(input_value_signature(item) for item in value))
+        return ("list", tuple(_input_value_signature(item, seen) for item in value))
     if isinstance(value, dict):
-        items = tuple((key, input_value_signature(item)) for key, item in sorted(value.items()))
+        items = tuple((key, _input_value_signature(item, seen)) for key, item in sorted(value.items()))
         return ("dict", items)
-    return (type(value).__name__, id(value))
+
+    value_id = id(value)
+    if value_id in seen:
+        return (type(value).__name__, value_id)
+
+    if hasattr(value, "__dict__"):
+        seen.add(value_id)
+        attrs = tuple(
+            (name, _object_attr_signature(item, seen))
+            for name, item in sorted(value.__dict__.items())
+            if name not in ("_parameters", "_buffers", "_modules")
+        )
+
+        if "_modules" in value.__dict__:
+            params = tuple(
+                (name, ("tensor_id", id(item)))
+                for name, item in sorted(value.__dict__.get("_parameters", {}).items())
+                if item is not None
+            )
+            buffers = tuple(
+                (name, ("tensor_id", id(item)))
+                for name, item in sorted(value.__dict__.get("_buffers", {}).items())
+                if item is not None
+            )
+            submodules = tuple(
+                (name, _input_value_signature(item, seen))
+                for name, item in sorted(value.__dict__.get("_modules", {}).items())
+                if item is not None
+            )
+            return (
+                "nn_module",
+                type(value).__name__,
+                value_id,
+                attrs,
+                params,
+                buffers,
+                submodules,
+                _callable_closure_signature(value, seen),
+            )
+
+        if callable(value) and _callable_python_impl(value) is not None:
+            return (
+                "callable_object",
+                type(value).__name__,
+                value_id,
+                attrs,
+                _callable_closure_signature(value, seen),
+            )
+
+        return (type(value).__name__, value_id, attrs)
+
+    return (type(value).__name__, value_id)
 
 
 def _captured_value_signature(value):
@@ -143,6 +212,22 @@ def _format_signature(signature, kind):
         if tag == "dict":
             keys = [key for key, _value in signature[1]]
             return f"dict keys={keys!r}"
+        if tag == "nn_module":
+            _, module_type, module_id, attrs, params, buffers, submodules, closure = signature
+            attr_names = [name for name, _value in attrs]
+            submodule_names = [name for name, _value in submodules]
+            return (
+                f"nn_module type={module_type} id={module_id} attrs={attr_names!r} "
+                f"params={len(params)} buffers={len(buffers)} submodules={submodule_names!r} "
+                f"closures={len(closure)}"
+            )
+        if tag == "callable_object":
+            _, callable_type, callable_id, attrs, closure = signature
+            attr_names = [name for name, _value in attrs]
+            return (
+                f"callable_object type={callable_type} id={callable_id} "
+                f"attrs={attr_names!r} closures={len(closure)}"
+            )
         return f"{tag} id={signature[1]}"
 
     tag = signature[0]

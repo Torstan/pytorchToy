@@ -99,6 +99,12 @@ class Proxy:
     def tanh(self):
         return self.tracer.create_proxy("tanh", (self,))
 
+    def exp(self):
+        return self.tracer.create_proxy("exp", (self,))
+
+    def log(self):
+        return self.tracer.create_proxy("log", (self,))
+
     def sum(self, dim=None, keepdim=False):
         return self.tracer.create_proxy("sum", (self,),
                                         {"dim": dim, "keepdim": keepdim})
@@ -137,6 +143,9 @@ class Proxy:
 
     def __neg__(self):
         return self.tracer.create_proxy("neg", (self,))
+
+    def __call__(self, *args, **kwargs):
+        return self.tracer.create_proxy("call_callable", (self, *args), kwargs)
 
     # ---- Graph Break 触发器 (data-dependent 操作不可 trace) ----
 

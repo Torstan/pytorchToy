@@ -63,10 +63,14 @@ def _unary_meta(args, kwargs):
 def _binary_meta(args, kwargs):
     del kwargs
     lhs, rhs = args
-    if not isinstance(lhs, FakeTensor):
-        raise MetaPropagationError(f"lhs must be FakeTensor, got {type(lhs)}")
-    if not isinstance(rhs, FakeTensor):
+    if isinstance(lhs, FakeTensor) and not isinstance(rhs, FakeTensor):
         return lhs.clone()
+    if not isinstance(lhs, FakeTensor) and isinstance(rhs, FakeTensor):
+        return rhs.clone()
+    if not isinstance(lhs, FakeTensor):
+        raise MetaPropagationError(
+            f"binary meta expects at least one FakeTensor input, got {type(lhs)} and {type(rhs)}"
+        )
     shape = _broadcast_shapes(lhs.shape, rhs.shape)
     requires_grad = lhs.requires_grad or rhs.requires_grad
     return FakeTensor(shape, dtype=lhs.dtype, requires_grad=requires_grad)
@@ -170,9 +174,20 @@ def _layer_norm_meta(args, kwargs):
     )
 
 
+def _call_callable_meta(args, kwargs):
+    try:
+        return args[0](*args[1:], **kwargs)
+    except Exception as exc:
+        raise MetaPropagationError(
+            f"failed to infer meta for callable input {args[0]!r}: {exc}"
+        ) from exc
+
+
 _META_RULES = {
     "sin": _unary_meta,
     "cos": _unary_meta,
+    "exp": _unary_meta,
+    "log": _unary_meta,
     "relu": _unary_meta,
     "tanh": _unary_meta,
     "neg": _unary_meta,
@@ -187,6 +202,7 @@ _META_RULES = {
     "t": _t_meta,
     "addmm": _addmm_meta,
     "layer_norm": _layer_norm_meta,
+    "call_callable": _call_callable_meta,
 }
 
 

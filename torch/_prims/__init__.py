@@ -11,6 +11,14 @@ def cos(x):
     return x.cos()
 
 
+def exp(x):
+    return x.exp()
+
+
+def log(x):
+    return x.log()
+
+
 def relu(x):
     return x.relu()
 

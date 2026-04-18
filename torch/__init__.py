@@ -55,3 +55,17 @@ def tanh(input_tensor):
     if hasattr(input_tensor, "tanh"):
         return input_tensor.tanh()
     raise TypeError(f"torch.tanh expected Tensor-like input, got {type(input_tensor)}")
+
+
+def exp(input_tensor):
+    """torch.exp -- 逐元素指数函数"""
+    if hasattr(input_tensor, "exp"):
+        return input_tensor.exp()
+    raise TypeError(f"torch.exp expected Tensor-like input, got {type(input_tensor)}")
+
+
+def log(input_tensor):
+    """torch.log -- 逐元素对数函数"""
+    if hasattr(input_tensor, "log"):
+        return input_tensor.log()
+    raise TypeError(f"torch.log expected Tensor-like input, got {type(input_tensor)}")

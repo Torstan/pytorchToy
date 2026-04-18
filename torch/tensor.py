@@ -392,6 +392,12 @@ class Tensor:
     def cos(self):
         return Tensor(_C.cos(self._c))
 
+    def exp(self):
+        return self._apply_unary(math.exp)
+
+    def log(self):
+        return self._apply_unary(math.log)
+
     # ---- 比较 ----
 
     def gt(self, value):
@@ -462,6 +468,14 @@ class Tensor:
         n = self.numel()
         for i in range(n):
             result.flat_set(i, op(self._c.flat_get(i), scalar))
+        return Tensor(result)
+
+    def _apply_unary(self, op):
+        sizes = list(self._c.sizes())
+        result = _C.empty(sizes)
+        n = self.numel()
+        for i in range(n):
+            result.flat_set(i, op(self._c.flat_get(i)))
         return Tensor(result)
 
     def _inplace_scalar(self, scalar, op):

@@ -10,7 +10,11 @@ from torch._compile.tracer import UnsupportedTraceError
 from .symbolic_convert import convert_callable_to_graph
 
 
-def convert_frame(fn, example_inputs):
+def convert_frame(fn, example_inputs, *, graph_input_positions=None):
     if not example_inputs:
         raise UnsupportedTraceError("bytecode capture requires at least one runtime input")
-    return convert_callable_to_graph(fn, example_inputs)
+    return convert_callable_to_graph(
+        fn,
+        example_inputs,
+        graph_input_positions=graph_input_positions,
+    )
