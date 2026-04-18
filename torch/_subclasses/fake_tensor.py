@@ -19,6 +19,24 @@ def _contiguous_stride(shape):
     return tuple(stride)
 
 
+def _broadcast_shapes(lhs_shape, rhs_shape):
+    lhs = list(lhs_shape)
+    rhs = list(rhs_shape)
+    result = []
+    while lhs or rhs:
+        left = lhs.pop() if lhs else 1
+        right = rhs.pop() if rhs else 1
+        if left == 1:
+            result.append(right)
+            continue
+        if right == 1 or left == right:
+            result.append(left)
+            continue
+        raise RuntimeError(f"cannot broadcast shapes {lhs_shape} and {rhs_shape}")
+    result.reverse()
+    return tuple(result)
+
+
 class FakeTensor:
     def __init__(
         self,
@@ -97,6 +115,42 @@ class FakeTensor:
     def reshape(self, *shape):
         return self.view(*shape)
 
+    def _binary(self, other):
+        if isinstance(other, (int, float)):
+            return self.clone()
+        if isinstance(other, (FakeTensor, Tensor)):
+            return FakeTensor(
+                _broadcast_shapes(self.shape, tuple(other.shape)),
+                dtype=self.dtype,
+                requires_grad=self.requires_grad or getattr(other, "requires_grad", False),
+                device=self.device,
+            )
+        return NotImplemented
+
+    def __add__(self, other):
+        return self._binary(other)
+
+    def __radd__(self, other):
+        return self._binary(other)
+
+    def __sub__(self, other):
+        return self._binary(other)
+
+    def __rsub__(self, other):
+        return self._binary(other)
+
+    def __mul__(self, other):
+        return self._binary(other)
+
+    def __rmul__(self, other):
+        return self._binary(other)
+
+    def __truediv__(self, other):
+        return self._binary(other)
+
+    def __neg__(self):
+        return self.clone()
+
     def sum(self, dim=None, keepdim=False):
         if dim is None:
             return FakeTensor((), dtype=self.dtype, requires_grad=self.requires_grad, device=self.device)
@@ -108,6 +162,50 @@ class FakeTensor:
         else:
             dims.pop(dim)
         return FakeTensor(tuple(dims), dtype=self.dtype, requires_grad=self.requires_grad, device=self.device)
+
+    def relu(self):
+        return self.clone()
+
+    def tanh(self):
+        return self.clone()
+
+    def sin(self):
+        return self.clone()
+
+    def cos(self):
+        return self.clone()
+
+    def exp(self):
+        return self.clone()
+
+    def log(self):
+        return self.clone()
+
+    def mm(self, other):
+        other_shape = tuple(other.shape)
+        if len(self.shape) != 2 or len(other_shape) != 2:
+            raise RuntimeError("mm expects 2D inputs")
+        if self.shape[1] != other_shape[0]:
+            raise RuntimeError(f"mm shape mismatch: {self.shape} x {other_shape}")
+        return FakeTensor(
+            (self.shape[0], other_shape[1]),
+            dtype=self.dtype,
+            requires_grad=self.requires_grad or getattr(other, "requires_grad", False),
+            device=self.device,
+        )
+
+    def t(self):
+        if len(self.shape) != 2:
+            raise RuntimeError("t expects 2D input")
+        return FakeTensor(
+            (self.shape[1], self.shape[0]),
+            dtype=self.dtype,
+            requires_grad=self.requires_grad,
+            device=self.device,
+        )
+
+    def __bool__(self):
+        raise RuntimeError("cannot convert FakeTensor to bool")
 
     def __repr__(self):
         return (

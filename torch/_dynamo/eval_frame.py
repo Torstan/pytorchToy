@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 
 from torch._compile.tracer import Tracer, UnsupportedTraceError
 from torch._logging import get_log_settings
+from torch.tensor import Tensor
 
 from .backends.registry import lookup_backend
 from . import config
@@ -113,6 +114,29 @@ def _flatten_runtime_inputs(fn, args, kwargs, *, signature=None):
     return flat_args, signature
 
 
+def _graph_input_positions(flat_args):
+    return tuple(
+        index for index, value in enumerate(flat_args)
+        if isinstance(value, Tensor)
+    )
+
+
+def _extract_graph_inputs(flat_args, graph_input_positions):
+    return tuple(flat_args[index] for index in graph_input_positions)
+
+
+def _rebind_graph_inputs(flat_args, graph_input_positions, graph_args):
+    if len(graph_args) != len(graph_input_positions):
+        raise RuntimeError(
+            "graph input arity mismatch: "
+            f"expected {len(graph_input_positions)}, got {len(graph_args)}"
+        )
+    rebound = list(flat_args)
+    for index, value in zip(graph_input_positions, graph_args):
+        rebound[index] = value
+    return tuple(rebound)
+
+
 def _rebuild_runtime_call(signature, flat_args):
     call_args = []
     call_kwargs = {}
@@ -130,7 +154,16 @@ def _rebuild_runtime_call(signature, flat_args):
     return tuple(call_args), call_kwargs
 
 
-def _wrap_compiled_with_runtime_binding(fn, compiled, signature):
+def _select_graph_input_signature(signature, graph_input_positions):
+    if signature is None:
+        return None
+    parameters = list(signature.parameters.values())
+    return inspect.Signature(
+        parameters=[parameters[index] for index in graph_input_positions]
+    )
+
+
+def _wrap_compiled_with_runtime_binding(fn, compiled, signature, graph_input_positions):
     def compiled_with_binding(*args, **kwargs):
         flat_args, _ = _flatten_runtime_inputs(
             fn,
@@ -138,9 +171,35 @@ def _wrap_compiled_with_runtime_binding(fn, compiled, signature):
             kwargs,
             signature=signature,
         )
-        return compiled(*flat_args)
+        return compiled(*_extract_graph_inputs(flat_args, graph_input_positions))
 
     return compiled_with_binding
+
+
+def _make_trace_fn(fn, flat_args, signature, graph_input_positions):
+    if graph_input_positions == tuple(range(len(flat_args))):
+        if signature is None:
+            return fn
+
+        def trace_fn(*runtime_args):
+            call_args, call_kwargs = _rebuild_runtime_call(signature, runtime_args)
+            return fn(*call_args, **call_kwargs)
+
+        trace_fn.__signature__ = signature
+        return trace_fn
+
+    selected_signature = _select_graph_input_signature(signature, graph_input_positions)
+
+    def trace_fn(*graph_args):
+        rebound_flat_args = _rebind_graph_inputs(flat_args, graph_input_positions, graph_args)
+        if signature is None:
+            return fn(*rebound_flat_args)
+        call_args, call_kwargs = _rebuild_runtime_call(signature, rebound_flat_args)
+        return fn(*call_args, **call_kwargs)
+
+    if selected_signature is not None:
+        trace_fn.__signature__ = selected_signature
+    return trace_fn
 
 
 class OptimizedFunction:
@@ -193,18 +252,24 @@ class OptimizedFunction:
 
     def _compile_for_signature(self, *args, **kwargs):
         flat_args, signature = _flatten_runtime_inputs(self._original_fn, args, kwargs)
+        graph_input_positions = _graph_input_positions(flat_args)
+        graph_example_inputs = _extract_graph_inputs(flat_args, graph_input_positions)
         try:
-            graph_module = convert_frame(self._original_fn, flat_args)
+            graph_module = convert_frame(
+                self._original_fn,
+                flat_args,
+                graph_input_positions=graph_input_positions,
+            )
         except UnsupportedTraceError:
-            trace_fn = self._original_fn
-            if signature is not None:
-                def trace_fn(*runtime_args):
-                    call_args, call_kwargs = _rebuild_runtime_call(signature, runtime_args)
-                    return self._original_fn(*call_args, **call_kwargs)
-
+            trace_fn = _make_trace_fn(
+                self._original_fn,
+                flat_args,
+                signature,
+                graph_input_positions,
+            )
             tracer = Tracer()
             try:
-                graph_module = tracer.trace(trace_fn, flat_args)
+                graph_module = tracer.trace(trace_fn, graph_example_inputs)
             except (UnsupportedTraceError, TypeError):
                 if self._nopython:
                     raise
@@ -220,10 +285,13 @@ class OptimizedFunction:
 
         self._log_guards(build_guard_manager(self._original_fn, args, kwargs))
         self._log_graph(graph_module)
-        compiled = self._backend(graph_module, list(flat_args))
-        if signature is None:
-            return compiled
-        return _wrap_compiled_with_runtime_binding(self._original_fn, compiled, signature)
+        compiled = self._backend(graph_module, list(graph_example_inputs))
+        return _wrap_compiled_with_runtime_binding(
+            self._original_fn,
+            compiled,
+            signature,
+            graph_input_positions,
+        )
 
     def _log_graph(self, graph_module):
         settings = get_log_settings()

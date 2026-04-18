@@ -142,6 +142,16 @@ def _op_cos(args, kwargs):
     return args[0].cos()
 
 
+@_register_op("exp")
+def _op_exp(args, kwargs):
+    return args[0].exp()
+
+
+@_register_op("log")
+def _op_log(args, kwargs):
+    return args[0].log()
+
+
 @_register_op("add")
 def _op_add(args, kwargs):
     return args[0] + args[1]
@@ -232,6 +242,11 @@ def _op_layer_norm(args, kwargs):
     return F.layer_norm(*args, **kwargs)
 
 
+@_register_op("call_callable")
+def _op_call_callable(args, kwargs):
+    return args[0](*args[1:], **kwargs)
+
+
 # ---- 解释执行 ----
 
 def _interpret(graph, args):
@@ -273,6 +288,8 @@ def _resolve(value, env):
 _FORMAT_RULES = {
     "sin": lambda node: f"torch.sin({_format_value(node.args[0])})",
     "cos": lambda node: f"torch.cos({_format_value(node.args[0])})",
+    "exp": lambda node: f"torch.exp({_format_value(node.args[0])})",
+    "log": lambda node: f"torch.log({_format_value(node.args[0])})",
     "add": lambda node: f"{_format_value(node.args[0])} + {_format_value(node.args[1])}",
     "sub": lambda node: f"{_format_value(node.args[0])} - {_format_value(node.args[1])}",
     "mul": lambda node: f"{_format_value(node.args[0])} * {_format_value(node.args[1])}",
@@ -285,6 +302,7 @@ _FORMAT_RULES = {
         f"layer_norm({_format_value(node.args[0])}, {_format_value(node.args[1])}, "
         f"{_format_value(node.args[2])}, eps={_format_value(node.kwargs.get('eps', 1e-5))})"
     ),
+    "call_callable": lambda node: _format_callable_call(node),
 }
 
 
@@ -298,6 +316,13 @@ def _format_call(node):
     kwargs = ", ".join(f"{k}={_format_value(v)}" for k, v in node.kwargs.items())
     joined = ", ".join(part for part in (args, kwargs) if part)
     return f"{_target_name(node.target)}({joined})"
+
+
+def _format_callable_call(node):
+    args = ", ".join(_format_value(arg) for arg in node.args[1:])
+    kwargs = ", ".join(f"{key}={_format_value(value)}" for key, value in node.kwargs.items())
+    joined = ", ".join(part for part in (args, kwargs) if part)
+    return f"{_format_value(node.args[0])}({joined})"
 
 
 def _format_value(value):
