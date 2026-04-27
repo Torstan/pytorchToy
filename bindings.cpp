@@ -91,7 +91,11 @@ PYBIND11_MODULE(_C, m) {
         // 对 1D tensor 返回 0-dim tensor（标量 tensor），与 PyTorch 行为一致
         .def("__getitem__", [](const Tensor& t, int i) {
             auto* impl = t.unsafeGetTensorImpl();
+            if (impl->dim() == 0)
+                throw py::index_error("too many indices for tensor");
             if (i < 0) i += impl->sizes_[0];
+            if (i < 0 || i >= impl->sizes_[0])
+                throw py::index_error("index out of range");
             int new_offset = impl->storage_offset_ + i * impl->strides_[0];
             std::vector<int> new_sizes(impl->sizes_.begin() + 1, impl->sizes_.end());
             std::vector<int> new_strides(impl->strides_.begin() + 1, impl->strides_.end());
@@ -109,6 +113,8 @@ PYBIND11_MODULE(_C, m) {
             for (int d = 0; d < nidx; d++) {
                 int i = py::cast<int>(idx[d]);
                 if (i < 0) i += impl->sizes_[d];
+                if (i < 0 || i >= impl->sizes_[d])
+                    throw py::index_error("index out of range");
                 new_offset += i * impl->strides_[d];
             }
             std::vector<int> new_sizes(impl->sizes_.begin() + nidx, impl->sizes_.end());
@@ -118,8 +124,23 @@ PYBIND11_MODULE(_C, m) {
             return Tensor(TensorImplPtr(vi));
         })
         .def("__setitem__", [](Tensor& t, int i, float v) {
-            t.data_ptr()[i] = v;
-            t.unsafeGetTensorImpl()->bump_version();
+            auto* impl = t.unsafeGetTensorImpl();
+            if (i < 0) i += impl->numel();
+            if (i < 0 || i >= impl->numel())
+                throw py::index_error("index out of range");
+            if (impl->is_contiguous()) {
+                impl->data_ptr()[i] = v;
+            } else {
+                int offset = impl->storage_offset_;
+                int idx = i;
+                for (int d = impl->dim() - 1; d >= 0; d--) {
+                    int coord = idx % impl->sizes_[d];
+                    idx /= impl->sizes_[d];
+                    offset += coord * impl->strides_[d];
+                }
+                impl->storage_->data[offset] = v;
+            }
+            impl->bump_version();
         })
         // item() — 从 0-dim 标量 tensor 取出 float 值，类似 PyTorch
         .def("item", [](const Tensor& t) {

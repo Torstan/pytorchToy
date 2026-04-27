@@ -401,6 +401,8 @@ class Tensor:
     # ---- 比较 ----
 
     def gt(self, value):
+        if isinstance(value, Tensor):
+            return self._apply_binary(value, lambda a, b: 1.0 if a > b else 0.0)
         return self._apply_scalar(float(value), lambda a, b: 1.0 if a > b else 0.0)
 
     def __gt__(self, other):

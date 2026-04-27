@@ -210,7 +210,7 @@ class Variable:
         result = Variable(result_tensor, requires_grad=any_requires_grad)
 
         if any_requires_grad:
-            add_fn = _C.AddBackward()
+            add_fn = _C.AddBackward(list(self.data.shape), list(other.data.shape))
             add_fn.num_inputs = 2
             add_fn.requires_grad = True
 
