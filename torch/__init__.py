@@ -3,6 +3,8 @@ pytorchToy 的 Python 包入口
 模拟 PyTorch 的 import torch 接口
 """
 
+__version__ = "2.1.0"
+
 from torch.tensor import (
     Tensor, FloatTensor, zeros, ones, randn, manual_seed,
     tensor, randint, argmax,
@@ -17,7 +19,6 @@ from torch._compile import compile
 import torch._dynamo
 import torch._logging
 import torch.testing
-
 
 def set_num_threads(num):
     """设置线程数 (pytorchToy 无多线程运行时，仅做兼容)"""

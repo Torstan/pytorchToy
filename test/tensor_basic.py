@@ -105,6 +105,16 @@ sub2 = t3[1]  # 单索引 → 2D view
 assert sub2.dim() == 2
 assert sub2.sizes() == [2, 2]
 assert_data(sub2, [5, 6, 7, 8], "t3[1]")
+try:
+    _ = t3[2]
+    raise AssertionError("out-of-range positive index should fail")
+except IndexError:
+    pass
+try:
+    _ = t3[-3]
+    raise AssertionError("out-of-range negative index should fail")
+except IndexError:
+    pass
 print(f"  多维索引: t3[0,0,1]={t3[0,0,1]}, t3[0,1]={t3[0,1]}, t3[1]={t3[1]}  ✓")
 
 # from_data
@@ -286,6 +296,17 @@ neg = _C.tensor([[-1.0, 2.0, -3.0],
 neg_t = neg.transpose(0, 1)  # [[-1,4],[2,-5],[-3,6]]
 relu_result = neg_t.relu()
 assert_data(relu_result, [0, 4, 2, 0, 0, 6], "relu on transposed")
+
+# scalar assignment through a non-contiguous 1D view must follow strides
+col_view = at[1]
+col_view[1] = 42.0
+assert approx(a[1, 1].item(), 42.0), "non-contiguous __setitem__ should write logical index"
+col_view[1] = 4.0
+try:
+    col_view[2] = 0.0
+    raise AssertionError("out-of-range assignment should fail")
+except IndexError:
+    pass
 
 # sum on non-contiguous
 s_val = neg_t.sum()
