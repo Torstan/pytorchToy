@@ -4,6 +4,7 @@
 这里只保留 meta 信息，不持有真实 storage。
 """
 
+from torch._compile.ops import broadcast_shapes
 from torch.tensor import Tensor, float32
 
 
@@ -17,24 +18,6 @@ def _contiguous_stride(shape):
         stride[index] = running
         running *= dims[index]
     return tuple(stride)
-
-
-def _broadcast_shapes(lhs_shape, rhs_shape):
-    lhs = list(lhs_shape)
-    rhs = list(rhs_shape)
-    result = []
-    while lhs or rhs:
-        left = lhs.pop() if lhs else 1
-        right = rhs.pop() if rhs else 1
-        if left == 1:
-            result.append(right)
-            continue
-        if right == 1 or left == right:
-            result.append(left)
-            continue
-        raise RuntimeError(f"cannot broadcast shapes {lhs_shape} and {rhs_shape}")
-    result.reverse()
-    return tuple(result)
 
 
 class FakeTensor:
@@ -120,7 +103,7 @@ class FakeTensor:
             return self.clone()
         if isinstance(other, (FakeTensor, Tensor)):
             return FakeTensor(
-                _broadcast_shapes(self.shape, tuple(other.shape)),
+                broadcast_shapes(self.shape, tuple(other.shape)),
                 dtype=self.dtype,
                 requires_grad=self.requires_grad or getattr(other, "requires_grad", False),
                 device=self.device,

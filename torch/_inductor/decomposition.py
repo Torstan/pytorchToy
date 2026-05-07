@@ -2,15 +2,8 @@
 mini-Inductor 使用的最小 decomposition 选择与图改写。
 """
 
+from torch._compile.ops import target_name
 from torch.fx import Graph, GraphModule, Node
-
-
-def _target_name(target):
-    if isinstance(target, str):
-        return target
-    if hasattr(target, "__name__"):
-        return target.__name__
-    return repr(target)
 
 
 def select_decomp_table():
@@ -60,7 +53,7 @@ def decompose_graph_module(graph_module, decomposition_table=None):
             mapping[node] = new_node
             continue
         if node.op == "call_function":
-            target = decomposition_table.get(_target_name(node.target), node.target)
+            target = decomposition_table.get(target_name(node.target), node.target)
             new_node = graph.call_function(
                 target,
                 args=rewrite(node.args),

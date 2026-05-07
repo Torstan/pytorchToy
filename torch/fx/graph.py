@@ -9,13 +9,18 @@ Graph 由 Node 组成，每个 Node 代表一个操作：
   - output: 图的输出
 """
 
+from torch._compile.ops import (
+    EAGER_OP_TABLE,
+    normalize_shape_args,
+    register_eager_op,
+    run_eager_target,
+    target_name,
+)
 
-def target_name(target):
-    if isinstance(target, str):
-        return target
-    if hasattr(target, "__name__"):
-        return target.__name__
-    return repr(target)
+_OP_TABLE = EAGER_OP_TABLE
+_normalize_shape_args = normalize_shape_args
+_register_op = register_eager_op
+_target_name = target_name
 
 
 class Node:
@@ -119,134 +124,6 @@ class GraphModule:
         return code
 
 
-# ---- 算子分发表 ----
-
-EAGER_OP_TABLE = {}
-
-
-def register_eager_op(name):
-    """注册算子到分发表"""
-    def decorator(fn):
-        EAGER_OP_TABLE[name] = fn
-        return fn
-    return decorator
-
-
-@register_eager_op("sin")
-def _op_sin(args, kwargs):
-    return args[0].sin()
-
-
-@register_eager_op("cos")
-def _op_cos(args, kwargs):
-    return args[0].cos()
-
-
-@register_eager_op("exp")
-def _op_exp(args, kwargs):
-    return args[0].exp()
-
-
-@register_eager_op("log")
-def _op_log(args, kwargs):
-    return args[0].log()
-
-
-@register_eager_op("add")
-def _op_add(args, kwargs):
-    return args[0] + args[1]
-
-
-@register_eager_op("sub")
-def _op_sub(args, kwargs):
-    return args[0] - args[1]
-
-
-@register_eager_op("mul")
-def _op_mul(args, kwargs):
-    return args[0] * args[1]
-
-
-@register_eager_op("div")
-def _op_div(args, kwargs):
-    return args[0] / args[1]
-
-
-@register_eager_op("neg")
-def _op_neg(args, kwargs):
-    return -args[0]
-
-
-@register_eager_op("relu")
-def _op_relu(args, kwargs):
-    return args[0].relu()
-
-
-@register_eager_op("tanh")
-def _op_tanh(args, kwargs):
-    return args[0].tanh()
-
-
-@register_eager_op("sum")
-def _op_sum(args, kwargs):
-    return args[0].sum(**kwargs)
-
-
-@register_eager_op("gt")
-def _op_gt(args, kwargs):
-    del kwargs
-    return args[0].gt(args[1])
-
-
-@register_eager_op("t")
-def _op_t(args, kwargs):
-    del kwargs
-    return args[0].t()
-
-
-@register_eager_op("mm")
-def _op_mm(args, kwargs):
-    del kwargs
-    return args[0].mm(args[1])
-
-
-def normalize_shape_args(args):
-    if len(args) == 2 and isinstance(args[1], (tuple, list)):
-        return tuple(args[1])
-    return tuple(args[1:])
-
-
-@register_eager_op("view")
-def _op_view(args, kwargs):
-    del kwargs
-    return args[0].view(*normalize_shape_args(args))
-
-
-@register_eager_op("reshape")
-def _op_reshape(args, kwargs):
-    del kwargs
-    return args[0].reshape(*normalize_shape_args(args))
-
-
-@register_eager_op("addmm")
-def _op_addmm(args, kwargs):
-    del kwargs
-    bias, lhs, rhs = args
-    return lhs.mm(rhs) + bias
-
-
-@register_eager_op("layer_norm")
-def _op_layer_norm(args, kwargs):
-    import torch.nn.functional as F
-
-    return F.layer_norm(*args, **kwargs)
-
-
-@register_eager_op("call_callable")
-def _op_call_callable(args, kwargs):
-    return args[0](*args[1:], **kwargs)
-
-
 # ---- 解释执行 ----
 
 def interpret(graph, args):
@@ -260,14 +137,7 @@ def interpret(graph, args):
         elif node.op == "call_function":
             call_args = tuple(resolve(a, env) for a in node.args)
             call_kwargs = {k: resolve(v, env) for k, v in node.kwargs.items()}
-            op_fn = EAGER_OP_TABLE.get(node.target)
-            if op_fn is not None:
-                env[node.name] = op_fn(call_args, call_kwargs)
-                continue
-            if not isinstance(node.target, str):
-                env[node.name] = node.target(*call_args, **call_kwargs)
-                continue
-            raise RuntimeError(f"unsupported compiled target: {node.target}")
+            env[node.name] = run_eager_target(node.target, call_args, call_kwargs)
         elif node.op == "output":
             return resolve(node.args[0], env)
     return None
@@ -280,6 +150,10 @@ def resolve(value, env):
     if isinstance(value, (tuple, list)):
         return type(value)(resolve(v, env) for v in value)
     return value
+
+
+_interpret = interpret
+_resolve = resolve
 
 
 # ---- 代码生成辅助 ----

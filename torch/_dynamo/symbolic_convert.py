@@ -4,6 +4,7 @@ import inspect
 import types
 from dataclasses import dataclass
 
+from torch._compile.ops import TENSOR_METHOD_NAMES, TORCH_OPERATOR_NAMES
 from torch.fx import Graph, GraphModule, UnsupportedTraceError
 from torch.tensor import Tensor
 
@@ -35,36 +36,6 @@ _COMPARE_OPS = {
     "is": lambda lhs, rhs: lhs is rhs,
     "is not": lambda lhs, rhs: lhs is not rhs,
 }
-
-_TORCH_OPERATOR_NAMES = {
-    "sin",
-    "cos",
-    "exp",
-    "log",
-    "relu",
-    "tanh",
-    "sum",
-    "view",
-    "reshape",
-    "mm",
-    "addmm",
-}
-
-_TENSOR_METHOD_NAMES = {
-    "sin",
-    "cos",
-    "exp",
-    "log",
-    "relu",
-    "tanh",
-    "sum",
-    "view",
-    "reshape",
-    "mm",
-    "t",
-    "gt",
-}
-
 
 @dataclass
 class _InlineSpec:
@@ -331,11 +302,11 @@ class InstructionTranslator:
 
     def _load_attr(self, owner, name):
         if isinstance(owner, TensorVariable):
-            if name not in _TENSOR_METHOD_NAMES:
+            if name not in TENSOR_METHOD_NAMES:
                 raise UnsupportedTraceError(f"unsupported Tensor attribute during bytecode capture: {name}")
             return TensorMethodVariable(owner, name)
         if isinstance(owner, TorchModuleVariable):
-            if name not in _TORCH_OPERATOR_NAMES:
+            if name not in TORCH_OPERATOR_NAMES:
                 raise UnsupportedTraceError(f"unsupported torch attribute during bytecode capture: {name}")
             return TorchOperatorVariable(name, getattr(owner.module, name))
         if isinstance(owner, ConstantVariable):
