@@ -1,15 +1,13 @@
 import torch
 
-from torch.fx import Node
-from torch._compile.pointwise import (
+from torch.fx import Node, Tracer
+from torch._inductor.lowering.partition import (
     CompiledGraph,
     CompiledOpStep,
     CompiledRegion,
-    GtKernel,
-    SingleNodeKernel,
     compile_graph_module,
 )
-from torch.fx import Tracer
+from torch._inductor.lowering.single_op import GtKernel, SingleNodeKernel
 from torch._functorch.aot_autograd import aot_function
 
 

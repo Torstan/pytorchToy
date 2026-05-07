@@ -2,7 +2,8 @@
 最小 torch._inductor.compile_fx 总控。
 """
 
-from torch._compile.pointwise import PointwiseLoweringError, compile_graph_module
+from torch._inductor.lowering.partition import compile_graph_module
+from torch._inductor.lowering.pointwise import PointwiseLoweringError
 from torch._functorch.aot_autograd import aot_module_simplified
 
 from .decomposition import decompose_graph_module, select_decomp_table
