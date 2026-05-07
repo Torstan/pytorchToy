@@ -5,32 +5,13 @@
 不参与真实执行。
 """
 
+from torch._compile.ops import broadcast_shapes, target_name
 from torch._subclasses.fake_tensor import FakeTensor
 from torch.tensor import Tensor
 
 
 class MetaPropagationError(RuntimeError):
     pass
-
-
-def _broadcast_shapes(lhs_shape, rhs_shape):
-    lhs = list(lhs_shape)
-    rhs = list(rhs_shape)
-    result = []
-    while lhs or rhs:
-        left = lhs.pop() if lhs else 1
-        right = rhs.pop() if rhs else 1
-        if left == 1:
-            result.append(right)
-            continue
-        if right == 1 or left == right:
-            result.append(left)
-            continue
-        raise MetaPropagationError(
-            f"cannot broadcast shapes {lhs_shape} and {rhs_shape}"
-        )
-    result.reverse()
-    return tuple(result)
 
 
 def _to_fake(value):
@@ -71,7 +52,7 @@ def _binary_meta(args, kwargs):
         raise MetaPropagationError(
             f"binary meta expects at least one FakeTensor input, got {type(lhs)} and {type(rhs)}"
         )
-    shape = _broadcast_shapes(lhs.shape, rhs.shape)
+    shape = broadcast_shapes(lhs.shape, rhs.shape, error_type=MetaPropagationError)
     requires_grad = lhs.requires_grad or rhs.requires_grad
     return FakeTensor(shape, dtype=lhs.dtype, requires_grad=requires_grad)
 
@@ -134,7 +115,7 @@ def _addmm_meta(args, kwargs):
     bias, lhs, rhs = args
     mm_out = _mm_meta((lhs, rhs), {})
     if isinstance(bias, FakeTensor):
-        shape = _broadcast_shapes(bias.shape, mm_out.shape)
+        shape = broadcast_shapes(bias.shape, mm_out.shape, error_type=MetaPropagationError)
         return FakeTensor(
             shape,
             dtype=mm_out.dtype,
@@ -206,16 +187,8 @@ _META_RULES = {
 }
 
 
-def _target_name(target):
-    if isinstance(target, str):
-        return target
-    if hasattr(target, "__name__"):
-        return target.__name__
-    return repr(target)
-
-
 def infer_meta(target, args, kwargs):
-    name = _target_name(target)
+    name = target_name(target)
     rule = _META_RULES.get(name)
     if rule is None:
         raise MetaPropagationError(f"no meta rule registered for {name}")
