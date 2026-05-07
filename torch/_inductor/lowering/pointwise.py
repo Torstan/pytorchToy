@@ -370,14 +370,6 @@ def _prepare_pointwise_runtime_args(args, output_shape, *, allow_requires_grad, 
     return prepared_args
 
 
-def _broadcast_shapes(lhs_shape, rhs_shape):
-    return broadcast_shapes(
-        lhs_shape,
-        rhs_shape,
-        error_type=PointwiseLoweringError,
-    )
-
-
 def lower_pointwise_graph(graph_module, example_inputs, *, allow_requires_grad=False):
     from torch.fx import Node
     from torch.tensor import Tensor, float32
@@ -399,7 +391,11 @@ def lower_pointwise_graph(graph_module, example_inputs, *, allow_requires_grad=F
 
     shape = tuple(tensor_inputs[0].shape)
     for inp in tensor_inputs[1:]:
-        shape = _broadcast_shapes(shape, tuple(inp.shape))
+        shape = broadcast_shapes(
+            shape,
+            tuple(inp.shape),
+            error_type=PointwiseLoweringError,
+        )
 
     graph = graph_module.graph
     env = {}
