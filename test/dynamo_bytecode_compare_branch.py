@@ -1,5 +1,5 @@
 import torch
-import torch._compile.tracer as tracer_mod
+import torch.fx.proxy as tracer_mod
 
 
 compiled = {"count": 0, "graphs": []}

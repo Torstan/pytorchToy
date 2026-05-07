@@ -42,7 +42,7 @@ def _to_fake(value):
 
 
 def _resolve(value, env):
-    from torch._compile.graph import Node
+    from torch.fx.graph import Node
 
     if isinstance(value, Node):
         return env[value.name]

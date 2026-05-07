@@ -4,8 +4,7 @@ import inspect
 import types
 from dataclasses import dataclass
 
-from torch._compile.graph import GraphModule
-from torch._compile.tracer import UnsupportedTraceError
+from torch.fx import Graph, GraphModule, UnsupportedTraceError
 from torch.tensor import Tensor
 
 from .variables import (
@@ -489,8 +488,6 @@ class InstructionTranslator:
 
 
 def convert_callable_to_graph(fn, example_inputs, *, graph_input_positions=None):
-    from torch._compile.graph import Graph
-
     spec = _build_inline_spec(fn)
     if len(example_inputs) != len(spec.parameter_names):
         raise UnsupportedTraceError(

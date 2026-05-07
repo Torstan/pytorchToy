@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-from torch._compile.tracer import Tracer
+from torch.fx import Tracer
 
 
 def fn(x, weight, bias):

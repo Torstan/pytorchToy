@@ -1,7 +1,7 @@
 import torch
 
 from torch._compile.pointwise import CompiledGraph, CompiledRegion, compile_graph_module
-from torch._compile.tracer import Tracer
+from torch.fx import Tracer
 
 
 def mixed_region_demo(x, y):

@@ -11,8 +11,7 @@ training 正确性依赖于编译后的 forward 仍然保留 eager autograd 语�
 
 from dataclasses import dataclass
 
-from torch._compile.graph import Graph, GraphModule
-from torch._compile.tracer import Tracer
+from torch.fx import Graph, GraphModule, Node, Tracer
 
 
 @dataclass
@@ -153,7 +152,7 @@ class _UnsupportedBackwardGraph(RuntimeError):
 
 
 def _rebuild_forward_value(bw_graph, cache, value):
-    from torch._compile.graph import Node
+    from torch.fx import Node
 
     if isinstance(value, Node):
         cached = cache.get(value)
@@ -237,7 +236,7 @@ def _grad_to_target(bw_graph, grad_value, source_node, target_node):
 
 
 def _build_backward_graph(graph_module, example_inputs):
-    from torch._compile.graph import Node
+    from torch.fx import Node
     from torch.tensor import Tensor
 
     output_example = graph_module(*example_inputs)

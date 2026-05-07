@@ -12,7 +12,7 @@ import inspect
 import textwrap
 from dataclasses import dataclass
 
-from torch._compile.tracer import Tracer, UnsupportedTraceError
+from torch.fx import Tracer, UnsupportedTraceError
 
 _NO_RETURN = object()
 
