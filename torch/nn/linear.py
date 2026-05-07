@@ -50,7 +50,7 @@ class Linear(Module):
 
     def forward(self, input):
         import torch.nn.functional as F
-        from torch._compile.tracer import is_tracing
+        from torch.fx import is_tracing
 
         if is_tracing():
             return F.linear(input, self.weight, self.bias)

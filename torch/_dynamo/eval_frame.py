@@ -9,7 +9,7 @@
 import inspect
 from dataclasses import dataclass, field
 
-from torch._compile.tracer import Tracer, UnsupportedTraceError
+from torch.fx import Tracer, UnsupportedTraceError
 from torch._logging import get_log_settings
 from torch.tensor import Tensor
 

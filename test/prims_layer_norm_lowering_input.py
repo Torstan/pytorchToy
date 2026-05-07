@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-from torch._compile.tracer import Tracer
+from torch.fx import Tracer
 from torch._inductor.decomposition import decompose_graph_module, select_decomp_table
 
 

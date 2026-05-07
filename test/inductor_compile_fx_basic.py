@@ -1,6 +1,6 @@
 import torch
 
-from torch._compile.tracer import Tracer
+from torch.fx import Tracer
 from torch._inductor import compile_fx
 
 

@@ -12,7 +12,7 @@ from torch.tensor import Tensor
 
 
 def linear(input, weight, bias=None, packed_weight=None):
-    from torch._compile.tracer import is_tracing
+    from torch.fx import is_tracing
 
     if is_tracing():
         import torch._refs as refs
@@ -26,7 +26,7 @@ def linear(input, weight, bias=None, packed_weight=None):
 
 
 def layer_norm(input, weight, bias=None, eps=1e-5):
-    from torch._compile.tracer import current_tracer, is_tracing
+    from torch.fx import current_tracer, is_tracing
 
     if bias is None:
         raise NotImplementedError("layer_norm without bias is not supported yet")

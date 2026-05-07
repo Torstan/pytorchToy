@@ -386,7 +386,7 @@ def _broadcast_shapes(lhs_shape, rhs_shape):
 
 
 def lower_pointwise_graph(graph_module, example_inputs, *, allow_requires_grad=False):
-    from torch._compile.graph import Node, _target_name
+    from torch.fx.graph import Node, target_name
     from torch.tensor import Tensor, float32
 
     if not example_inputs:
@@ -442,13 +442,13 @@ def lower_pointwise_graph(graph_module, example_inputs, *, allow_requires_grad=F
             continue
 
         if node.op == "call_function":
-            target_name = _target_name(node.target)
-            if target_name not in _SUPPORTED_TARGETS:
+            target = target_name(node.target)
+            if target not in _SUPPORTED_TARGETS:
                 raise PointwiseLoweringError(f"unsupported pointwise target: {node.target}")
             if node.kwargs:
                 raise PointwiseLoweringError(f"kwargs are not supported in pointwise fast path: {node.target}")
 
-            if target_name in _UNARY_TARGETS:
+            if target in _UNARY_TARGETS:
                 if len(node.args) != 1:
                     raise PointwiseLoweringError(f"invalid unary node arity for {node.target}")
                 lhs = resolve_ref(node.args[0])
@@ -460,7 +460,7 @@ def lower_pointwise_graph(graph_module, example_inputs, *, allow_requires_grad=F
                 rhs = resolve_ref(node.args[1])
 
             env[node] = ValueRef("temp", num_temps)
-            instructions.append(Instruction(target_name, num_temps, lhs, rhs))
+            instructions.append(Instruction(target, num_temps, lhs, rhs))
             num_temps += 1
             continue
 
@@ -527,7 +527,7 @@ class CompiledGraph:
     output_value: object
 
     def run(self, args):
-        from torch._compile.graph import _resolve
+        from torch.fx.graph import resolve
 
         if len(args) != len(self.placeholders):
             raise RuntimeError(
@@ -544,7 +544,7 @@ class CompiledGraph:
             else:
                 env[step.name] = _run_call_function_node(step, env)
 
-        return _resolve(self.output_value, env)
+        return resolve(self.output_value, env)
 
 
 def compile_graph_module(graph_module, example_inputs, *, allow_requires_grad=False):
@@ -631,16 +631,16 @@ def _compile_partitioned_graph(graph_module, example_inputs, *, allow_requires_g
 
 
 def _try_compile_region(nodes, start_index, users, env_example, *, allow_requires_grad=False):
-    from torch._compile.graph import _target_name
+    from torch.fx.graph import target_name
 
     start_node = nodes[start_index]
-    if start_node.op != "call_function" or _target_name(start_node.target) not in _SUPPORTED_TARGETS:
+    if start_node.op != "call_function" or target_name(start_node.target) not in _SUPPORTED_TARGETS:
         return None
 
     max_end_index = start_index
     while max_end_index + 1 < len(nodes):
         next_node = nodes[max_end_index + 1]
-        if next_node.op != "call_function" or _target_name(next_node.target) not in _SUPPORTED_TARGETS:
+        if next_node.op != "call_function" or target_name(next_node.target) not in _SUPPORTED_TARGETS:
             break
         max_end_index += 1
 
@@ -672,9 +672,9 @@ def _try_compile_region(nodes, start_index, users, env_example, *, allow_require
 
 
 def _try_compile_single_op(node, env_example):
-    from torch._compile.graph import _normalize_shape_args, _target_name
+    from torch.fx.graph import normalize_shape_args, target_name
 
-    target_name = _target_name(node.target)
+    target = target_name(node.target)
     input_nodes = []
     seen_inputs = set()
     input_indices = {}
@@ -692,7 +692,7 @@ def _try_compile_single_op(node, env_example):
         return input_indices[value]
 
     def freeze_inputs(value):
-        from torch._compile.graph import Node
+        from torch.fx.graph import Node
 
         if isinstance(value, Node):
             return InputRef(add_input(value))
@@ -706,13 +706,13 @@ def _try_compile_single_op(node, env_example):
 
     kernel = None
 
-    if target_name == "mm":
+    if target == "mm":
         if len(node.args) != 2 or node.kwargs:
             return None
         lhs_spec = freeze_inputs(node.args[0])
         rhs_spec = freeze_inputs(node.args[1])
         kernel = MmKernel(lhs_spec=lhs_spec, rhs_spec=rhs_spec)
-    elif target_name == "addmm":
+    elif target == "addmm":
         if len(node.args) != 3 or node.kwargs:
             return None
         bias_spec = freeze_inputs(node.args[0])
@@ -723,7 +723,7 @@ def _try_compile_single_op(node, env_example):
             lhs_spec=lhs_spec,
             rhs_spec=rhs_spec,
         )
-    elif target_name == "sum":
+    elif target == "sum":
         if len(node.args) != 1:
             return None
         arg_spec = freeze_inputs(node.args[0])
@@ -732,22 +732,22 @@ def _try_compile_single_op(node, env_example):
             dim=node.kwargs.get("dim"),
             keepdim=node.kwargs.get("keepdim", False),
         )
-    elif target_name == "t":
+    elif target == "t":
         if len(node.args) != 1 or node.kwargs:
             return None
         arg_spec = freeze_inputs(node.args[0])
         kernel = TransposeKernel(arg_spec=arg_spec)
-    elif target_name == "view":
+    elif target == "view":
         if not node.args or node.kwargs:
             return None
         arg_spec = freeze_inputs(node.args[0])
-        kernel = ViewKernel(arg_spec=arg_spec, shape=_normalize_shape_args(node.args))
-    elif target_name == "reshape":
+        kernel = ViewKernel(arg_spec=arg_spec, shape=normalize_shape_args(node.args))
+    elif target == "reshape":
         if not node.args or node.kwargs:
             return None
         arg_spec = freeze_inputs(node.args[0])
-        kernel = ReshapeKernel(arg_spec=arg_spec, shape=_normalize_shape_args(node.args))
-    elif target_name == "layer_norm":
+        kernel = ReshapeKernel(arg_spec=arg_spec, shape=normalize_shape_args(node.args))
+    elif target == "layer_norm":
         if len(node.args) != 3:
             return None
         input_spec = freeze_inputs(node.args[0])
@@ -759,22 +759,22 @@ def _try_compile_single_op(node, env_example):
             bias_spec=bias_spec,
             eps=node.kwargs.get("eps", 1e-5),
         )
-    elif target_name in _UNARY_TARGETS:
+    elif target in _UNARY_TARGETS:
         if len(node.args) != 1 or node.kwargs:
             return None
         kernel = UnaryPointwiseKernel(
-            target=target_name,
+            target=target,
             arg_spec=freeze_inputs(node.args[0]),
         )
-    elif target_name in _BINARY_TARGETS:
+    elif target in _BINARY_TARGETS:
         if len(node.args) != 2 or node.kwargs:
             return None
         kernel = BinaryPointwiseKernel(
-            target=target_name,
+            target=target,
             lhs_spec=freeze_inputs(node.args[0]),
             rhs_spec=freeze_inputs(node.args[1]),
         )
-    elif target_name == "gt":
+    elif target == "gt":
         if len(node.args) != 2 or node.kwargs:
             return None
         kernel = GtKernel(
@@ -786,7 +786,7 @@ def _try_compile_single_op(node, env_example):
         return None
 
     return CompiledOpStep(
-        target=target_name,
+        target=target,
         input_nodes=input_nodes,
         output_node=node,
         compiled_kernel=kernel,
@@ -794,7 +794,7 @@ def _try_compile_single_op(node, env_example):
 
 
 def _build_region_graph_module(region_nodes, env_example):
-    from torch._compile.graph import Graph, GraphModule, Node
+    from torch.fx.graph import Graph, GraphModule, Node
 
     graph = Graph()
     mapping = {}
@@ -847,7 +847,7 @@ def _region_has_single_output(region_nodes, users):
 
 
 def _build_users(nodes):
-    from torch._compile.graph import Node
+    from torch.fx.graph import Node
 
     users = {}
 
@@ -870,11 +870,11 @@ def _build_users(nodes):
 
 
 def _run_call_function_node(node, env):
-    from torch._compile.graph import _OP_TABLE, _resolve
+    from torch.fx.graph import EAGER_OP_TABLE, resolve
 
-    call_args = tuple(_resolve(arg, env) for arg in node.args)
-    call_kwargs = {key: _resolve(value, env) for key, value in node.kwargs.items()}
-    op_fn = _OP_TABLE.get(node.target)
+    call_args = tuple(resolve(arg, env) for arg in node.args)
+    call_kwargs = {key: resolve(value, env) for key, value in node.kwargs.items()}
+    op_fn = EAGER_OP_TABLE.get(node.target)
     if op_fn is not None:
         return op_fn(call_args, call_kwargs)
     if not isinstance(node.target, str):
@@ -1043,9 +1043,9 @@ def _materialize_input_specs(value, args):
 
 
 def _run_kernel_target(target, call_args, call_kwargs):
-    from torch._compile.graph import _OP_TABLE
+    from torch.fx.graph import EAGER_OP_TABLE
 
-    op_fn = _OP_TABLE.get(target)
+    op_fn = EAGER_OP_TABLE.get(target)
     if op_fn is not None:
         return op_fn(call_args, call_kwargs)
     if not isinstance(target, str):

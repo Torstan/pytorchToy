@@ -1,19 +1,17 @@
 import torch
-
-from torch._compile.tracer import UnsupportedTraceError
+from torch.fx import UnsupportedTraceError
 
 
 def demo(x):
-    if x.item() > 0:
-        return torch.sin(x)
-    return torch.cos(x)
+    if x.sum().item() > 0:
+        return x + 1
+    return x - 1
 
 
 compiled = torch.compile(demo, backend="eager", fullgraph=True)
-
+x = torch.ones([2, 2])
 try:
-    compiled(torch.tensor(1.0))
+    compiled(x)
+    raise AssertionError("expected UnsupportedTraceError")
 except UnsupportedTraceError:
-    print("compile_fullgraph_error: ok")
-else:
-    raise AssertionError("expected fullgraph=True to raise on graph break")
+    pass

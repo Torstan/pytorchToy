@@ -2,7 +2,7 @@
 mini-Inductor 使用的最小 decomposition 选择与图改写。
 """
 
-from torch._compile.graph import Graph, GraphModule, Node
+from torch.fx import Graph, GraphModule, Node
 
 
 def _target_name(target):

@@ -1,6 +1,6 @@
 import torch
 
-from torch._compile.graph import Node
+from torch.fx import Node
 from torch._compile.pointwise import (
     CompiledGraph,
     CompiledOpStep,
@@ -9,7 +9,7 @@ from torch._compile.pointwise import (
     SingleNodeKernel,
     compile_graph_module,
 )
-from torch._compile.tracer import Tracer
+from torch.fx import Tracer
 from torch._functorch.aot_autograd import aot_function
 
 

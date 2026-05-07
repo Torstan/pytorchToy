@@ -1,7 +1,7 @@
 import torch
 
 from torch._compile.pointwise import CppPointwiseKernel, NativePointwiseKernel, compile_graph_module
-from torch._compile.tracer import Tracer
+from torch.fx import Tracer
 
 
 def fn(x, b):
