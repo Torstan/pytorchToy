@@ -1,6 +1,6 @@
 import torch
 
-from torch._compile.pointwise import compile_graph_module
+from torch._inductor.lowering.partition import compile_graph_module
 from torch.fx import Tracer
 
 
