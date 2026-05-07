@@ -9,18 +9,7 @@ Graph 由 Node 组成，每个 Node 代表一个操作：
   - output: 图的输出
 """
 
-from torch._compile.ops import (
-    EAGER_OP_TABLE,
-    normalize_shape_args,
-    register_eager_op,
-    run_eager_target,
-    target_name,
-)
-
-_OP_TABLE = EAGER_OP_TABLE
-_normalize_shape_args = normalize_shape_args
-_register_op = register_eager_op
-_target_name = target_name
+from torch._compile.ops import run_eager_target, target_name
 
 
 class Node:
@@ -150,10 +139,6 @@ def resolve(value, env):
     if isinstance(value, (tuple, list)):
         return type(value)(resolve(v, env) for v in value)
     return value
-
-
-_interpret = interpret
-_resolve = resolve
 
 
 # ---- 代码生成辅助 ----
